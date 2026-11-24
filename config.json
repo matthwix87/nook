@@ -1,0 +1,25 @@
+{
+  "port": 8787,
+  "allowed_origins": ["https://matthwix87.github.io"],
+  "data_dir": "data",
+  "ollama_url": "http://127.0.0.1:11434",
+  "model": "qwen3.8:27b",
+
+  "auto_manage_ollama": true,
+  "ollama_on_cmd": "~/.local/bin/ollama-on",
+  "ollama_off_cmd": "~/.local/bin/ollama-off",
+  "ollama_idle_minutes": 15,
+  "ollama_start_timeout_s": 90,
+
+  "owner_context_tokens": 65536,
+  "owner_max_reply_tokens": 8192,
+  "guest_context_tokens": 8192,
+  "guest_max_reply_tokens": 1024,
+  "guest_requests_per_minute": 6,
+  "guest_max_message_chars": 8000,
+  "default_daily_allowance": 20000,
+
+  "login_max_failures": 10,
+  "login_lockout_minutes": 15,
+  "max_body_bytes": 262144
+}
