@@ -663,6 +663,137 @@ def run_feature_tests():
     check("delete project with its chats", s == 200 and req("GET", f"/api/conversations/{zconv}", auth=OWNER)[0] == 404)
     s, body, _ = req("POST", "/api/projects", {"name": "  "}, auth=OWNER)
     check("project needs a name", s == 400)
+    run_account_tests(OWNER, BOB, CAROL)
+    run_system_tests(OWNER, CAROL)
+
+
+def cli(*args):
+    return subprocess.run([sys.executable, os.path.join(ROOT, "server", "server.py"), *args], env=ENV,
+                          capture_output=True, text=True, timeout=60)
+
+
+def run_account_tests(OWNER, BOB, CAROL):
+    # ---- reply style presets
+    s, st, _ = req("PATCH", "/api/settings", {"reply_style": "short"}, auth=OWNER)
+    chat(OWNER, "style test")
+    sysmsg = fake("/_last")["messages"][0]["content"]
+    check("reply style (account default) added to the system message", st["reply_style"] == "short"
+          and "keep answers short" in sysmsg, sysmsg)
+    s, ev = chat(OWNER, "per chat", reply_style="beginner")
+    cid = meta(ev)["conversation_id"]
+    check("reply style per chat (new chat)", "new to the topic" in fake("/_last")["messages"][0]["content"])
+    req("PATCH", f"/api/conversations/{cid}", {"reply_style": "detailed"}, auth=OWNER)
+    chat(OWNER, "again", cid)
+    m = fake("/_last")["messages"][0]["content"]
+    check("reply style per chat (switched later), overrides the account default",
+          "thorough" in m and "short" not in m, m)
+    s1, _, _ = req("PATCH", "/api/settings", {"reply_style": "pirate"}, auth=OWNER)
+    s2, _ = chat(OWNER, "x", reply_style="pirate")
+    check("unknown reply style rejected", s1 == 400 and s2 == 400)
+    req("PATCH", "/api/settings", {"reply_style": ""}, auth=OWNER)
+
+    # ---- usage
+    s, u, _ = req("GET", "/api/usage", auth=CAROL)
+    me = req("GET", "/api/me", auth=CAROL)[1]
+    check("usage: 30 days, today matches tokens charged today, budget included",
+          s == 200 and len(u["days"]) == 30 and u["days"][-1]["tokens"] == me["tokens_today"] > 0
+          and u["days"][-1]["replies"] > 0 and u["budget"]["daily_allowance"] == me["daily_allowance"], u["days"][-1])
+    s, u, _ = req("GET", "/api/usage", auth=OWNER)
+    check("usage: owner shows unlimited", u["budget"]["unlimited"] is True)
+
+    # ---- export (own data only)
+    s, ex, _ = req("GET", "/api/export", auth=CAROL)
+    text = json.dumps(ex)
+    check("export: own chats with messages, nothing from other accounts",
+          s == 200 and ex["username"] == "carol_test" and any(c["messages"] for c in ex["conversations"])
+          and any(m["content"] == "hello" for c in ex["conversations"] for m in c["messages"])
+          and "first question, edited" not in text and "PROJECT_FACT_42" not in text)
+
+    # ---- change my key
+    s, r, _ = req("POST", "/api/me/rotate", auth=BOB)
+    KEYS_SEEN.append(r["key"])
+    s1 = req("GET", "/api/me", auth=BOB)[0]
+    s2 = req("GET", "/api/me", auth=("bob_test", r["key"]))[0]
+    check("change my key: old key stops working, new key works", s == 200 and s1 == 401 and s2 == 200)
+    BOB = ("bob_test", r["key"])
+
+    # ---- delete my account
+    s1, b1, _ = req("DELETE", "/api/me", {"confirm": "OWNER"}, auth=OWNER)
+    s2, b2, _ = req("DELETE", "/api/me", {"confirm": "wrong"}, auth=BOB)
+    check("delete account: owner can't, wrong confirmation rejected", s1 == 400 and s2 == 400 and b2["error"] == "confirm")
+    bob_projects = len(req("GET", "/api/projects", auth=BOB)[1])
+    s, _, _ = req("DELETE", "/api/me", {"confirm": "Bob_Test"}, auth=BOB)
+    con = sqlite3.connect(os.path.join(DATA, "gateway.db"))
+    left = con.execute("SELECT (SELECT COUNT(*) FROM accounts WHERE username='bob_test'), "
+                       "(SELECT COUNT(*) FROM projects WHERE account_id NOT IN (SELECT id FROM accounts)), "
+                       "(SELECT COUNT(*) FROM conversations WHERE account_id NOT IN (SELECT id FROM accounts)), "
+                       "(SELECT COUNT(*) FROM project_files WHERE project_id NOT IN (SELECT id FROM projects))").fetchone()
+    con.close()
+    check("delete account: login gone, chats/projects/files deleted",
+          s == 200 and bob_projects > 0 and req("GET", "/api/me", auth=BOB)[0] == 401 and left == (0, 0, 0, 0), left)
+
+
+def run_system_tests(OWNER, CAROL):
+    DAVE = new_guest(OWNER, "dave_test")
+    # ---- admin activity: counts only
+    s, act, _ = req("GET", "/api/admin/activity", auth=OWNER)
+    carol = next(a for a in act["accounts"] if a["username"] == "carol_test")
+    check("activity: per-account counts and busiest hours, no chat content",
+          s == 200 and carol["replies_today"] > 0 and carol["tokens_7d"] >= carol["tokens_today"] > 0
+          and len(act["hours_7d"]) == 24 and sum(act["hours_7d"]) > 0
+          and "first question, edited" not in json.dumps(act) and set(carol) == {"username", "last_active", "replies_today",
+                                                                    "tokens_today", "replies_7d", "tokens_7d"}, carol)
+    check("activity: owner only", req("GET", "/api/admin/activity", auth=CAROL)[0] == 403
+          and req("PATCH", "/api/admin/system", {"nook_off": True}, auth=CAROL)[0] == 403)
+
+    # ---- announcement
+    req("PATCH", "/api/admin/system", {"announcement": "Back at 9pm"}, auth=OWNER)
+    st = req("GET", "/status")[1]
+    s, _, _ = req("PATCH", "/api/admin/system", {"announcement": "x" * 301}, auth=OWNER)
+    req("PATCH", "/api/admin/system", {"announcement": ""}, auth=OWNER)
+    check("announcement shown in /status, capped, clearable",
+          st["announcement"] == "Back at 9pm" and s == 400 and req("GET", "/status")[1]["announcement"] == "")
+
+    # ---- maintenance: everyone but the owner blocked
+    req("PATCH", "/api/admin/system", {"maintenance": True}, auth=OWNER)
+    s1, b1 = chat(DAVE, "hi")
+    s2, _ = chat(OWNER, "hi")
+    s3 = req("POST", "/api/warm", auth=DAVE)[0]
+    st = req("GET", "/status")[1]
+    req("PATCH", "/api/admin/system", {"maintenance": False}, auth=OWNER)
+    s4, _ = chat(DAVE, "hi")
+    check("maintenance: guests refused (chat + warm), owner can chat, off again works",
+          s1 == 503 and b1["error"] == "maintenance" and s2 == 200 and s3 == 503 and st["maintenance"] and s4 == 200,
+          (s1, s2, s3, s4))
+
+    # ---- Nook off: stops Ollama, refuses everyone, never starts it, survives via DB, CLI works
+    chat(OWNER, "make sure Ollama is up")
+    up_before = ollama_up()
+    s, sysj, _ = req("PATCH", "/api/admin/system", {"nook_off": True}, auth=OWNER)
+    stopped = wait_for(lambda: not ollama_up(), 6)
+    check("nook off: Ollama stopped right away", up_before and sysj["nook_off"] and stopped)
+    s1, b1 = chat(OWNER, "hi")
+    s2 = req("POST", "/api/warm", auth=OWNER)[0]
+    s3, b3 = chat(DAVE, "hi")
+    time.sleep(1)
+    check("nook off: chat and warm refused for everyone incl. owner, Ollama not started",
+          s1 == 503 and b1["error"] == "nook_off" and s2 == 503 and s3 == 503 and not ollama_up(), (s1, s2, s3))
+    codes = [req("GET", "/api/me", auth=OWNER)[0], req("GET", "/api/conversations", auth=DAVE)[0],
+             req("GET", "/api/settings", auth=DAVE)[0], req("GET", "/api/admin/accounts", auth=OWNER)[0]]
+    check("nook off: login, history, settings, admin still work", codes == [200] * 4 and req("GET", "/status")[1]["nook_off"])
+    r = cli("--nook-on")
+    s, ev = chat(OWNER, "back on")
+    check("CLI --nook-on is picked up by the running server", r.returncode == 0 and s == 200 and done_of(ev), r.stdout + r.stderr)
+    # An Ollama the proxy did NOT start is stopped too, when switched off from the CLI
+    kill_fake()
+    manual = subprocess.Popen([sys.executable, FAKE_SCRIPT, str(FAKE_PORT)], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, env={**ENV, "FAKE_START_DELAY": "0"})
+    wait_for(ollama_up, 5)
+    r = cli("--nook-off")
+    stopped = wait_for(lambda: not ollama_up(), 8)
+    manual.poll()
+    check("CLI --nook-off stops an Ollama started by someone else", r.returncode == 0 and stopped, r.stdout + r.stderr)
+    cli("--nook-on")
 
 
 OLD_SCHEMA = """

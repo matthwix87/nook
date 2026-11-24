@@ -6,6 +6,7 @@ Usage:
   python3 server/server.py                 run (creates the owner key on first run)
   python3 server/server.py --init          only create the owner account, then exit
   python3 server/server.py --rotate-owner-key
+  python3 server/server.py --nook-off | --nook-on   switch chatting off/on for everyone (stops Ollama)
 """
 import datetime
 import hashlib
@@ -129,6 +130,13 @@ CREATE TABLE IF NOT EXISTS project_files (
   created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS proj_acc ON projects(account_id);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS usage_events (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  ts REAL NOT NULL,
+  tokens INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_acc_ts ON usage_events(account_id, ts);
 CREATE INDEX IF NOT EXISTS pfile_proj ON project_files(project_id);
 """)
 
@@ -136,8 +144,8 @@ CREATE INDEX IF NOT EXISTS pfile_proj ON project_files(project_id);
 def migrate():
     """Add columns introduced after the first release (safe to run on every start)."""
     added = {
-        "accounts": [("instructions", "TEXT NOT NULL DEFAULT ''")],
-        "conversations": [("pinned", "INTEGER NOT NULL DEFAULT 0"), ("project_id", "INTEGER")],
+        "accounts": [("instructions", "TEXT NOT NULL DEFAULT ''"), ("reply_style", "TEXT NOT NULL DEFAULT ''")],
+        "conversations": [("pinned", "INTEGER NOT NULL DEFAULT 0"), ("project_id", "INTEGER"), ("reply_style", "TEXT")],
         "messages": [("attachments", "TEXT")],  # JSON list of {name, content} on user messages
     }
     for table, cols in added.items():
@@ -149,6 +157,24 @@ def migrate():
 
 
 migrate()
+
+
+def flag(key, default=""):
+    """Global switches (nook_off, maintenance, announcement), stored in the DB so the CLI and restarts see them."""
+    row = q1("SELECT value FROM settings WHERE key=?", (key,))
+    return row["value"] if row else default
+
+
+def set_flag(key, value):
+    q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+REPLY_STYLES = {
+    "": "",
+    "short": "Reply style: keep answers short - a few sentences or a brief list.",
+    "detailed": "Reply style: give thorough, detailed answers with examples where they help.",
+    "beginner": "Reply style: explain as if the user is new to the topic - plain words, no jargon, small steps.",
+}
 
 
 def q(sql, args=()):
@@ -227,6 +253,8 @@ def charge(acc_id, tokens):
         q("""UPDATE accounts SET daily_used=daily_used+?, topup=topup-?, tokens_today=tokens_today+?,
              total_tokens=total_tokens+?, total_requests=total_requests+1, last_active=? WHERE id=?""",
           (from_daily, from_topup, tokens, tokens, time.time(), acc_id))
+        q("INSERT INTO usage_events (account_id, ts, tokens) VALUES (?,?,?)", (acc_id, time.time(), tokens))
+        q("DELETE FROM usage_events WHERE ts < ?", (time.time() - 90 * 86400,))
         return get_account("id=?", (acc_id,))
 
 
@@ -293,6 +321,8 @@ class Ollama:
     @classmethod
     def ensure(cls):
         cls.last_activity = time.time()
+        if flag("nook_off"):
+            return False  # never start Ollama while switched off
         if cls.status()[0]:
             return True
         if not CFG["auto_manage_ollama"]:
@@ -346,10 +376,24 @@ class Ollama:
             cls.warming = False
 
     @classmethod
+    def stop_now(cls):
+        """Nook off: stop Ollama regardless of who started it, to free the GPU."""
+        with cls.lock:
+            log("Nook is switched off, stopping Ollama")
+            cls.run(CFG["ollama_off_cmd"])
+            cls.started_by_us = False
+
+    @classmethod
     def idle_watcher(cls):
-        """Stop Ollama after it sat idle, but only if this proxy started it."""
+        """Stop Ollama after it sat idle (only if this proxy started it), or at once when Nook is off."""
+        last_off = 0
         while True:
-            time.sleep(5)
+            time.sleep(2)
+            if flag("nook_off"):
+                if time.time() - last_off > 60 and cls.status()[0]:
+                    last_off = time.time()
+                    cls.stop_now()
+                continue
             idle = time.time() - cls.last_activity
             if (cls.started_by_us and cls.active == 0 and CFG["auto_manage_ollama"]
                     and idle > CFG["ollama_idle_minutes"] * 60):
@@ -534,6 +578,13 @@ class Handler(BaseHTTPRequestHandler):
         ("DELETE", r"/api/conversations/(\d+)", "delete_conv"),
         ("POST", r"/api/chat", "chat"),
         ("POST", r"/api/warm", "warm"),
+        ("DELETE", r"/api/me", "delete_me"),
+        ("POST", r"/api/me/rotate", "rotate_me"),
+        ("GET", r"/api/usage", "usage"),
+        ("GET", r"/api/export", "export"),
+        ("GET", r"/api/admin/activity", "admin_activity"),
+        ("GET", r"/api/admin/system", "admin_system"),
+        ("PATCH", r"/api/admin/system", "admin_edit_system"),
         ("GET", r"/api/settings", "get_settings"),
         ("PATCH", r"/api/settings", "edit_settings"),
         ("GET", r"/api/projects", "list_projects"),
@@ -588,7 +639,16 @@ class Handler(BaseHTTPRequestHandler):
             "backend": True, "ollama": up, "model": CFG["model"], "model_available": model_ok,
             "auto_start": CFG["auto_manage_ollama"],
             "available": (up and model_ok) or (not up and CFG["auto_manage_ollama"]),
+            "nook_off": bool(flag("nook_off")), "maintenance": bool(flag("maintenance")),
+            "announcement": flag("announcement"),
         })
+
+    def check_open(self, acc):
+        """Refuse chat / warm-up when Nook is off (everyone) or in maintenance (everyone but the owner)."""
+        if flag("nook_off"):
+            raise ApiError(503, "nook_off", "Nook is switched off by the owner right now.")
+        if flag("maintenance") and not acc["is_owner"]:
+            raise ApiError(503, "maintenance", "Nook is down for maintenance. Try again later.")
 
     def me(self):
         acc = self.authenticate()
@@ -604,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
     def list_convs(self):
         acc = self.authenticate()
         term = (parse_qs(urlparse(self.path).query).get("q") or [""])[0].strip()[:200]
-        cols = "id, title, created, updated, pinned, project_id"
+        cols = "id, title, created, updated, pinned, project_id, reply_style"
         if not term:
             rows = q(f"SELECT {cols} FROM conversations WHERE account_id=? ORDER BY pinned DESC, updated DESC",
                      (acc["id"],))
@@ -650,13 +710,17 @@ class Handler(BaseHTTPRequestHandler):
             q("UPDATE conversations SET title=? WHERE id=?", (title, conv_id))
         if "pinned" in body:
             q("UPDATE conversations SET pinned=? WHERE id=?", (1 if body["pinned"] else 0, conv_id))
+        if "reply_style" in body:  # null = follow the account's default
+            if body["reply_style"] is not None and body["reply_style"] not in REPLY_STYLES:
+                raise ApiError(400, "bad_request", "Unknown reply style")
+            q("UPDATE conversations SET reply_style=? WHERE id=?", (body["reply_style"], conv_id))
         if "project_id" in body:
             pid = body["project_id"]
             if pid is not None:
                 pid = self.own_project(acc, pid)["id"]
             q("UPDATE conversations SET project_id=? WHERE id=?", (pid, conv_id))
         conv = self.own_conv(acc, conv_id)
-        self.send_json(200, {k: conv[k] for k in ("id", "title", "created", "updated", "pinned", "project_id")})
+        self.send_json(200, {k: conv[k] for k in ("id", "title", "created", "updated", "pinned", "project_id", "reply_style")})
 
     def delete_conv(self, conv_id):
         acc = self.authenticate()
@@ -667,6 +731,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- warm-up (preload the model while the user types)
     def warm(self):
         acc = self.authenticate()  # also rejects disabled accounts
+        self.check_open(acc)
         if not acc["is_owner"] and budget(acc)["total_left"] <= 0:
             raise ApiError(402, "no_tokens", "You're out of tokens for today.", resets_at=next_midnight())
         with throttle_lock:
@@ -678,10 +743,62 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=Ollama.warm, daemon=True).start()
         self.send_json(202, {"ok": True, "started": started})
 
+    # ---- my account: delete, rotate key, usage, export
+    def delete_me(self):
+        acc = self.authenticate()
+        if acc["is_owner"]:
+            raise ApiError(400, "owner", "The owner account can't be deleted")
+        if str(self.read_json().get("confirm", "")).lower() != acc["username"].lower():
+            raise ApiError(400, "confirm", "Type your username to confirm")
+        q("DELETE FROM accounts WHERE id=?", (acc["id"],))  # chats, projects, files and usage cascade
+        log("account deleted by its user:", acc["username"])
+        self.send_json(200, {"ok": True})
+
+    def rotate_me(self):
+        acc = self.authenticate()
+        key = new_key()
+        q("UPDATE accounts SET key_hash=? WHERE id=?", (hash_key(key), acc["id"]))
+        log("key rotated by its user:", acc["username"])
+        self.send_json(200, {"key": key})
+
+    def usage(self):
+        acc = self.authenticate()
+        start = datetime.date.today() - datetime.timedelta(days=29)
+        rows = q("SELECT date(ts, 'unixepoch', 'localtime') AS day, SUM(tokens) AS tokens, COUNT(*) AS replies "
+                 "FROM usage_events WHERE account_id=? AND ts>=? GROUP BY day",
+                 (acc["id"], datetime.datetime.combine(start, datetime.time()).timestamp()))
+        by_day = {r["day"]: r for r in rows}
+        days = []
+        for i in range(30):
+            d = (start + datetime.timedelta(days=i)).isoformat()
+            r = by_day.get(d)
+            days.append({"day": d, "tokens": r["tokens"] if r else 0, "replies": r["replies"] if r else 0})
+        self.send_json(200, {"days": days, "budget": budget(acc), "total_tokens": acc["total_tokens"]})
+
+    def export(self):
+        acc = self.authenticate()
+        projects = {p["id"]: p for p in q("SELECT * FROM projects WHERE account_id=?", (acc["id"],))}
+        convs = []
+        for c in q("SELECT * FROM conversations WHERE account_id=? ORDER BY created", (acc["id"],)):
+            msgs = q("SELECT role, content, attachments, created FROM messages WHERE conversation_id=? ORDER BY id",
+                     (c["id"],))
+            convs.append({"title": c["title"], "created": c["created"], "updated": c["updated"],
+                          "project": projects[c["project_id"]]["name"] if c["project_id"] in projects else None,
+                          "messages": [{"role": m["role"], "content": m["content"], "created": m["created"],
+                                        "attachments": json.loads(m["attachments"] or "[]")} for m in msgs]})
+        out = {"username": acc["username"], "exported": time.time(), "custom_instructions": acc["instructions"],
+               "projects": [{"name": p["name"], "instructions": p["instructions"],
+                             "files": [dict(f) for f in q("SELECT name, content FROM project_files WHERE project_id=?",
+                                                          (p["id"],))]} for p in projects.values()],
+               "conversations": convs}
+        self.send_json(200, out)
+
     # ---- custom instructions
     def get_settings(self):
         acc = self.authenticate()
-        self.send_json(200, {"instructions": acc["instructions"], "max_instructions_chars": CFG["max_instructions_chars"],
+        acc = get_account("id=?", (acc["id"],))
+        self.send_json(200, {"instructions": acc["instructions"], "reply_style": acc["reply_style"],
+                             "max_instructions_chars": CFG["max_instructions_chars"],
                              "max_file_bytes": CFG["max_file_bytes"], "max_files_per_message": CFG["max_files_per_message"],
                              "max_project_bytes": CFG["max_project_bytes"]})
 
@@ -698,6 +815,10 @@ class Handler(BaseHTTPRequestHandler):
         body = self.read_json()
         if "instructions" in body:
             q("UPDATE accounts SET instructions=? WHERE id=?", (self.clean_instructions(body["instructions"]), acc["id"]))
+        if "reply_style" in body:
+            if body["reply_style"] not in REPLY_STYLES:
+                raise ApiError(400, "bad_request", "Unknown reply style")
+            q("UPDATE accounts SET reply_style=? WHERE id=?", (body["reply_style"], acc["id"]))
         self.get_settings()
 
     # ---- projects
@@ -792,6 +913,7 @@ class Handler(BaseHTTPRequestHandler):
     def chat(self):
         """New message, edit of an earlier user message (edit_message_id), or regenerate (regenerate: true)."""
         acc = self.authenticate()
+        self.check_open(acc)
         body = self.read_json()
         owner = bool(acc["is_owner"])
         regenerate = bool(body.get("regenerate"))
@@ -815,6 +937,9 @@ class Handler(BaseHTTPRequestHandler):
         conv = self.own_conv(acc, int(conv_id)) if conv_id is not None else None
         if (regenerate or edit_id is not None) and not conv:
             raise ApiError(400, "bad_request", "conversation_id is required")
+        style = body.get("reply_style")
+        if style is not None and style not in REPLY_STYLES:
+            raise ApiError(400, "bad_request", "Unknown reply style")
         if conv:
             project_id = conv["project_id"]
         else:
@@ -840,7 +965,10 @@ class Handler(BaseHTTPRequestHandler):
             convo = rows[:idx] + [{**rows[idx], "content": text}]
         else:
             convo = rows + [{"role": "user", "content": text, "attachments": attachments}]
-        messages, max_reply, notices = self.build_prompt(acc, owner, project, convo)
+        if conv and conv["reply_style"] is not None:
+            style = conv["reply_style"]
+        messages, max_reply, notices = self.build_prompt(acc, owner, project, convo,
+                                                         acc["reply_style"] if style is None else style)
 
         if not owner:
             with throttle_lock:
@@ -866,8 +994,9 @@ class Handler(BaseHTTPRequestHandler):
                 if conv is None:
                     title = " ".join(text.split())
                     title = title if len(title) <= 50 else title[:50].rsplit(" ", 1)[0] + "..."
-                    conv_id = db.execute("INSERT INTO conversations (account_id, title, created, updated, project_id) "
-                                         "VALUES (?,?,?,?,?)", (acc["id"], title, now, now, project_id)).lastrowid
+                    conv_id = db.execute("INSERT INTO conversations (account_id, title, created, updated, project_id, "
+                                         "reply_style) VALUES (?,?,?,?,?,?)",
+                                         (acc["id"], title, now, now, project_id, style)).lastrowid
                 conv_id = int(conv_id)
                 if regenerate:
                     user_id = convo[-1]["id"]
@@ -886,7 +1015,7 @@ class Handler(BaseHTTPRequestHandler):
             Ollama.active -= 1
             Ollama.last_activity = time.time()
 
-    def build_prompt(self, acc, owner, project, convo):
+    def build_prompt(self, acc, owner, project, convo, style=""):
         """Fit system text, project files and history into the account's context window.
 
         Priority: system prompt + custom instructions + project instructions + the newest user message (must fit,
@@ -898,6 +1027,8 @@ class Handler(BaseHTTPRequestHandler):
         system = [CFG["system_prompt"]] if CFG["system_prompt"] else []  # assistant identity, always first
         if acc["instructions"]:
             system.append("The user's custom instructions:\n" + acc["instructions"])
+        if REPLY_STYLES.get(style):
+            system.append(REPLY_STYLES[style])
         if project:
             system.append(f'This chat is part of the project "{project["name"]}".')
             if project["instructions"]:
@@ -1029,6 +1160,52 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "not_found", "Account not found")
         return acc
 
+    def admin_activity(self):
+        """Counts only - never chat content."""
+        self.require_owner()
+        now = time.time()
+        day0 = datetime.datetime.combine(datetime.date.today(), datetime.time()).timestamp()
+        week0 = now - 7 * 86400
+        accounts = []
+        for a in q("SELECT id, username, last_active FROM accounts ORDER BY is_owner DESC, username"):
+            t = q1("SELECT COUNT(*) AS n, COALESCE(SUM(tokens), 0) AS tok FROM usage_events WHERE account_id=? AND ts>=?",
+                   (a["id"], day0))
+            w = q1("SELECT COUNT(*) AS n, COALESCE(SUM(tokens), 0) AS tok FROM usage_events WHERE account_id=? AND ts>=?",
+                   (a["id"], week0))
+            accounts.append({"username": a["username"], "last_active": a["last_active"],
+                             "replies_today": t["n"], "tokens_today": t["tok"],
+                             "replies_7d": w["n"], "tokens_7d": w["tok"]})
+        hours = [0] * 24
+        for r in q("SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS h, COUNT(*) AS n "
+                   "FROM usage_events WHERE ts>=? GROUP BY h", (week0,)):
+            hours[r["h"]] = r["n"]
+        self.send_json(200, {"accounts": accounts, "hours_7d": hours})
+
+    def system_json(self):
+        return {"nook_off": bool(flag("nook_off")), "maintenance": bool(flag("maintenance")),
+                "announcement": flag("announcement")}
+
+    def admin_system(self):
+        self.require_owner()
+        self.send_json(200, self.system_json())
+
+    def admin_edit_system(self):
+        self.require_owner()
+        body = self.read_json()
+        if "announcement" in body:
+            text = " ".join(str(body["announcement"] or "").split())
+            if len(text) > 300:
+                raise ApiError(400, "too_long", "Keep the announcement under 300 characters")
+            set_flag("announcement", text)
+        if "maintenance" in body:
+            set_flag("maintenance", "1" if body["maintenance"] else "")
+        if "nook_off" in body:
+            set_flag("nook_off", "1" if body["nook_off"] else "")
+            log("Nook switched", "off" if body["nook_off"] else "on", "by the owner")
+            if body["nook_off"] and Ollama.status()[0]:
+                threading.Thread(target=Ollama.stop_now, daemon=True).start()
+        self.send_json(200, self.system_json())
+
     def admin_list(self):
         self.require_owner()
         rows = q("SELECT id FROM accounts ORDER BY is_owner DESC, username")
@@ -1119,6 +1296,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if "--nook-off" in sys.argv or "--nook-on" in sys.argv:
+        off = "--nook-off" in sys.argv
+        set_flag("nook_off", "1" if off else "")
+        print(f"Nook is now switched {'off' if off else 'on'} (a running gateway picks this up within seconds).")
+        if off and Ollama.status()[0]:
+            Ollama.stop_now()
+        return
     if "--rotate-owner-key" in sys.argv:
         create_owner_if_missing()
         key = new_key()
