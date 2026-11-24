@@ -34,7 +34,7 @@ Ollama is never exposed: the proxy binds to 127.0.0.1 and only the proxy is tunn
    `data/owner_key.txt` (mode 600) instead - read it, then delete that file.
    Lost it? `python3 server/server.py --rotate-owner-key` prints a new one.
 
-`scripts/start.sh --local` starts only the proxy (no tunnel). `scripts/stop.sh` stops both.
+`scripts/start.sh --local` starts only the proxy (no tunnel), `--tunnel-only` only the tunnel. `scripts/stop.sh` stops both.
 
 ## Daily use
 
@@ -117,26 +117,38 @@ when the proxy is unreachable or Ollama can't be used.
 
 ## Deploy the site to GitHub Pages
 
+On every frontend release, bump `CACHE` in `docs/sw.js` **and** the `?v=N` on `style.css`/`app.js` in
+`docs/index.html`, so phones never mix a new page with old cached scripts or styles.
+
 Push this repo to GitHub, then Settings -> Pages -> Source: **Deploy from a branch**, branch `main`, folder `/docs`.
 The PWA can then be installed from the phone browser ("Add to Home screen").
 
 Local dev: `cd docs && python3 -m http.server 8788`, then open `http://localhost:8788/?backend=http://127.0.0.1:8787`.
 
-## Optional: systemd user service (example, not enabled)
+## Start automatically at login (systemd --user)
 
-`~/.config/systemd/user/chat-gateway.service`:
 ```
-[Unit]
-Description=Ollama chat gateway proxy
-[Service]
-WorkingDirectory=%h/Projects/ollama-chat-gateway
-ExecStart=/usr/bin/python3 server/server.py
-Restart=on-failure
-[Install]
-WantedBy=default.target
+scripts/install-autostart.sh      # writes ~/.config/systemd/user/nook.service, enables and starts it
+scripts/uninstall-autostart.sh    # stops (this also stops the gateway) and removes it
+journalctl --user -u nook         # service log;  data/autostart.log has the script's own log
 ```
-(Create the owner key first with `python3 server/server.py --init` in a terminal. The tunnel still needs
-`start.sh` or its own unit.)
+
+At login the service runs `scripts/autostart.sh`: it waits for the network, starts the proxy, starts the
+tunnel (up to 5 tries, 15 s apart, in case the network isn't ready yet), then runs `publish-url.sh`.
+If the push fails (no network or git credentials), that is logged to `data/autostart.log` and the
+gateway keeps running; run `scripts/publish-url.sh` by hand later. `systemctl --user stop nook` runs
+`stop.sh`. Create the owner key once in a terminal first (`python3 server/server.py --init`).
+
+- Start at boot without logging in (optional): `loginctl enable-linger $USER`.
+- The quick-tunnel URL changes on every start, so every start publishes (commits and pushes)
+  `docs/backend.json`; Pages needs about a minute to pick it up.
+- If the tunnel dies later while the PC stays on, it is **not** restarted automatically (out of scope);
+  run `scripts/stop.sh && scripts/start.sh && scripts/publish-url.sh`, or restart the service.
+- `start.sh` and `stop.sh` ignore stale pid files left by a crash (they check the process command line).
+
+When the site can't reach the host, its "Try again" button keeps checking every 5 seconds for up to
+3 minutes (re-reading `backend.json` each time, since the URL changes on restart) and opens Nook as soon
+as the host answers. It can't switch on a PC that is off.
 
 ## Security notes
 
