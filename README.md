@@ -63,6 +63,9 @@ own domain and put that URL in `backend.json` once.
   get its instructions and files. Deleting a project asks whether to keep its chats (unassigned) or delete them.
 - Code blocks have **Open**: a side panel (bottom sheet on phones) with Copy, Download and, for HTML, a
   Preview tab rendered in a sandboxed iframe (`sandbox="allow-scripts"`, no same-origin access).
+- **Warm-up**: when you start typing, the site calls `POST /api/warm` (at most every 5 minutes) so the
+  proxy starts Ollama and loads the model with the same `num_ctx` as chats. No tokens charged; one per
+  account per minute; disabled or out-of-budget accounts are refused.
 - Light/dark theme following the system, with a manual toggle. Enter sends, Shift+Enter adds a line,
   Esc closes the panel or sidebar.
 
