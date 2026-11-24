@@ -1,6 +1,7 @@
-# Ollama chat gateway
+# Nook - Ollama chat gateway
 
 Chat with the Ollama model on this PC from a phone, and hand friends temporary accounts.
+The assistant introduces itself as **Nook**.
 
 ```
 phone (static site on GitHub Pages) --HTTPS--> Cloudflare quick tunnel --> proxy 127.0.0.1:8787 --> Ollama 127.0.0.1:11434
@@ -46,6 +47,41 @@ scripts/publish-url.sh    # commit + push backend.json so the site picks up the 
 every `start.sh` you must run `publish-url.sh` (Pages takes ~1 minute to redeploy). The site fetches
 `backend.json` with cache-busting on every load. For a stable URL, use a named Cloudflare tunnel with your
 own domain and put that URL in `backend.json` once.
+
+## Features
+
+- Streaming replies with a **Stop** button. Stopping closes the request to Ollama (generation stops) and
+  charges only the prompt estimate plus the tokens actually produced; the partial reply is kept.
+- **Edit** an earlier message (everything after it is removed and Nook answers again) and **Regenerate**
+  the last reply.
+- Chats: search by title and message text, rename, pin (pinned chats stay on top). New chats are titled
+  from the first message.
+- **Custom instructions** per account (Settings, max 2000 characters).
+- **File attachments**: text/code files only (UTF-8, max 200 KB each, 4 per message). They are sent to the
+  model as `<file name="...">...</file>` blocks after the message text and shown as chips. No images.
+- **Projects**: name, instructions and text files (max 1 MB per project). Chats started inside a project
+  get its instructions and files. Deleting a project asks whether to keep its chats (unassigned) or delete them.
+- Code blocks have **Open**: a side panel (bottom sheet on phones) with Copy, Download and, for HTML, a
+  Preview tab rendered in a sandboxed iframe (`sandbox="allow-scripts"`, no same-origin access).
+- Light/dark theme following the system, with a manual toggle. Enter sends, Shift+Enter adds a line,
+  Esc closes the panel or sidebar.
+
+### What goes into the context window
+
+Every chat is sent to the model as one system message followed by the conversation. The system message
+holds, in this order: `system_prompt` from `config.json` (the Nook identity, always first), the account's
+custom instructions, the project's instructions, then project files. Everything counts against the
+account's context window (guests ~8K tokens, owner 64K; estimate ~3 characters per token):
+
+1. System prompt + instructions + the new message with its attachments must fit. If they don't, the
+   message is refused with a clear "too big for the context window" error and nothing is saved or charged
+   (the text and files stay in the composer).
+2. Project files are added in upload order while they fit, keeping up to a quarter of the remaining room
+   for recent history. Files that don't fit are left out and the chat shows a note naming them.
+3. Older messages fill whatever room is left, newest first (older ones are trimmed, as before).
+
+`system_prompt` can be changed in `config.json` (or the `SYSTEM_PROMPT` env var); keep it short, it is
+counted in every guest's context. There is no UI for it.
 
 ## Accounts
 
@@ -106,13 +142,21 @@ WantedBy=default.target
 - Failed logins are throttled per client IP (10 failures -> 15 min lockout). Behind the tunnel the real IP
   comes from cloudflared's `CF-Connecting-IP` header.
 - CORS allows only the configured origins plus localhost; other browser origins get 403.
-- Request bodies are capped at 256 KB.
-- The frontend never uses `innerHTML` for model or user text.
+- Request bodies are capped at 2 MB (room for a few attached files).
+- The frontend never uses `innerHTML` for model or user text (only for its own constant SVG icons).
+- Every chat, project, file and instruction query is scoped to the logged-in account.
 - The key is stored in the browser's localStorage so logins persist; anyone with the phone unlocked can use it.
 - Anyone with the tunnel URL can reach the proxy (not Ollama); everything except `/status` needs a key.
+
+## Database upgrades
+
+New columns and tables (instructions, pinned, project_id, attachments, projects, project_files) are added
+automatically on startup; existing accounts, keys, budgets and chats are kept. Restart the gateway to
+pick up a new version.
 
 ## Tests
 
 `python3 tests/test_gateway.py` starts its own proxy on port 8797 with a temporary data dir and runs the
-end-to-end checks against the real Ollama (it stops Ollama first, lets the proxy auto-start it, and waits
-for the idle auto-stop).
+end-to-end checks against a fake Ollama (`tests/fake_ollama.py`, port 11597) that the proxy auto-starts
+and auto-stops through `OLLAMA_ON_CMD`/`OLLAMA_OFF_CMD`. It never touches `data/` or the real Ollama.
+It also migrates an old-schema database and, if `data/gateway.db` exists, a copy of it in a temp dir.

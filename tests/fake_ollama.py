@@ -3,6 +3,7 @@
 
 Usage: python3 tests/fake_ollama.py PORT
 - Replies "ok 1 2 3 ... " one token per chunk (10 tokens by default).
+- If it contains "CODE", replies with markdown holding an html and a python code block.
 - If the last user message contains "SLOW", streams 300 tokens 30 ms apart (for stop tests).
 - If it asks for "last number", replies "10" (history test).
 - GET /_last returns the last /api/chat request body; GET /_stats returns {"cancelled": n, "sent": n}.
@@ -41,7 +42,13 @@ class H(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         STATE["last"] = body
         last = next((m["content"] for m in reversed(body["messages"]) if m["role"] == "user"), "")
-        if "SLOW" in last:
+        if "CODE" in last:
+            text = ("Here is a small page:\n\n```html\n<!doctype html>\n<html><body style=\"font-family:sans-serif\">\n"
+                    "  <h1>Hello from Nook</h1>\n  <button onclick=\"this.textContent='Clicked'\">Click me</button>\n"
+                    "</body></html>\n```\n\nAnd the same idea in **Python**:\n\n```python\nprint('hello')\n```\n\n"
+                    "- It uses `print`\n- Nothing else")
+            tokens, delay = [text[i:i + 6] for i in range(0, len(text), 6)], 0
+        elif "SLOW" in last:
             tokens, delay = [f"t{i} " for i in range(300)], 0.03
         elif "last number" in last:
             tokens, delay = ["10"], 0
