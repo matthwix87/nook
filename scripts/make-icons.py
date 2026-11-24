@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Render site/icons/icon-192.png and icon-512.png (same design as icon.svg). Stdlib only."""
+"""Render docs/icons/icon-192.png and icon-512.png (same design as icon.svg). Stdlib only."""
 import os
 import struct
 import zlib
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "site", "icons")
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "icons")
 BLUE, WHITE = (0x5B, 0x7C, 0xF0), (255, 255, 255)
 
 

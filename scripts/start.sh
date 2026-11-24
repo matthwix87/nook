@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start the gateway proxy and a Cloudflare quick tunnel, then write the tunnel
-# URL to site/backend.json.   Usage: scripts/start.sh [--local]   (--local = no tunnel)
+# URL to docs/backend.json.   Usage: scripts/start.sh [--local]   (--local = no tunnel)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PORT="${PORT:-$(python3 -c 'import json; print(json.load(open("config.json"))["port"])')}"
@@ -43,6 +43,6 @@ if [ -z "$URL" ]; then
   echo "error: no tunnel URL after 60s, see data/cloudflared.log" >&2
   exit 1
 fi
-printf '{"url": "%s", "updated": "%s"}\n' "$URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > site/backend.json
-echo "Tunnel: $URL  (written to site/backend.json)"
+printf '{"url": "%s", "updated": "%s"}\n' "$URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > docs/backend.json
+echo "Tunnel: $URL  (written to docs/backend.json)"
 echo "Run scripts/publish-url.sh to push the new URL to GitHub Pages."

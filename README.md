@@ -8,7 +8,7 @@ phone (static site on GitHub Pages) --HTTPS--> Cloudflare quick tunnel --> proxy
 
 - `server/` - the proxy. Python 3 standard library only (no pip installs). Accounts, token budgets,
   chat history (SQLite in `data/`), streaming (SSE), admin API, Ollama auto start/stop.
-- `site/` - the static PWA (plain HTML/CSS/JS, no build). Reads the current backend URL from `site/backend.json`.
+- `docs/` - the static PWA (plain HTML/CSS/JS, no build). Reads the current backend URL from `docs/backend.json`.
 - `scripts/` - `start.sh`, `stop.sh`, `publish-url.sh`, `make-icons.py`.
 - `config.json` - all settings. Any key can be overridden by an upper-case env var (`PORT=9000`, `AUTO_MANAGE_OLLAMA=0`, `ALLOWED_ORIGINS=https://a.github.io,https://b.example`).
 - `data/` - database, logs, pid files. Gitignored. Back it up if you care about accounts/chats.
@@ -38,7 +38,7 @@ Ollama is never exposed: the proxy binds to 127.0.0.1 and only the proxy is tunn
 ## Daily use
 
 ```
-scripts/start.sh          # proxy + tunnel, writes the new URL to site/backend.json
+scripts/start.sh          # proxy + tunnel, writes the new URL to docs/backend.json
 scripts/publish-url.sh    # commit + push backend.json so the site picks up the new URL
 ```
 
@@ -78,11 +78,10 @@ when the proxy is unreachable or Ollama can't be used.
 
 ## Deploy the site to GitHub Pages
 
-Push this repo to GitHub, then Settings -> Pages -> Source: **GitHub Actions**. The included workflow
-`.github/workflows/pages.yml` publishes the `site/` folder on every push to `main` that touches `site/`.
+Push this repo to GitHub, then Settings -> Pages -> Source: **Deploy from a branch**, branch `main`, folder `/docs`.
 The PWA can then be installed from the phone browser ("Add to Home screen").
 
-Local dev: `cd site && python3 -m http.server 8788`, then open `http://localhost:8788/?backend=http://127.0.0.1:8787`.
+Local dev: `cd docs && python3 -m http.server 8788`, then open `http://localhost:8788/?backend=http://127.0.0.1:8787`.
 
 ## Optional: systemd user service (example, not enabled)
 
