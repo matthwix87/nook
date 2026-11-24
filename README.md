@@ -66,6 +66,16 @@ own domain and put that URL in `backend.json` once.
 - **Warm-up**: when you start typing, the site calls `POST /api/warm` (at most every 5 minutes) so the
   proxy starts Ollama and loads the model with the same `num_ctx` as chats. No tokens charged; one per
   account per minute; disabled or out-of-budget accounts are refused.
+- While waiting for the first token the reply shows "Thinking…", or "Waking up Nook…" when Ollama has to
+  start or load the model (a hint appears after 20 s).
+- **Settings** for every account: custom instructions, default reply style (Normal / Short / Detailed /
+  Explain like I'm new, also switchable per chat), theme, text size and density (per device), a 30-day
+  **usage** chart with allowance/refill/top-up, **export** of all chats (JSON or Markdown), **change my
+  key** (the old key stops working at once) and **delete my account** (type the username; not for the owner).
+- **Share** one chat as a self-contained `.html` page or `.md` file.
+- **Offline**: if the host can't be reached, the app still opens with the chats, projects and settings
+  this browser has cached (read-only, per account, cleared on logout; the key itself is never cached).
+  A banner retries every 5 s for 3 minutes and the app refreshes itself when the host is back.
 - Light/dark theme following the system, with a manual toggle. Enter sends, Shift+Enter adds a line,
   Esc closes the panel or sidebar.
 
@@ -106,6 +116,22 @@ and 8192-token replies, and can never be disabled or deleted.
 Usernames: 3-20 chars of letters, numbers, `_ . -`; reserved names and an inappropriate-word filter
 (leetspeak, repeated letters, separators, camelCase handled) are rejected with a generic message.
 Extend the list in `server/wordlist.txt`.
+
+## Owner controls (Admin page)
+
+- **Switch Nook off**: refuses chatting and warm-ups for everyone (owner included), never starts Ollama,
+  and stops a running Ollama right away (with `ollama_off_cmd`, whoever started it) to free the GPU.
+  Login, history, settings and Admin keep working; users see "Nook is switched off by the owner right
+  now". Stored in the database, so it survives restarts. From a terminal on the PC (works whether or not
+  the gateway is running; a running gateway notices within ~2 s):
+  ```
+  python3 server/server.py --nook-off
+  python3 server/server.py --nook-on
+  ```
+- **Maintenance mode**: everyone except the owner is refused, with a banner.
+- **Announcement**: a short message shown at the top for everyone (dismissible per device).
+- **Activity**: replies and tokens per account (today / 7 days), last active, busiest hours.
+  Counts only - chat content is never shown.
 
 ## Ollama auto start/stop
 
