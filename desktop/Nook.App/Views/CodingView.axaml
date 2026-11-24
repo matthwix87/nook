@@ -1,0 +1,181 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="using:Nook.App.Controls"
+             x:Class="Nook.App.Views.CodingView">
+  <UserControl.Styles>
+    <Style Selector="Border.diffline.added"><Setter Property="Background" Value="{DynamicResource AddedBrush}"/></Style>
+    <Style Selector="Border.diffline.removed"><Setter Property="Background" Value="{DynamicResource RemovedBrush}"/></Style>
+    <Style Selector="Border.diffline.gap"><Setter Property="Background" Value="{DynamicResource Surface2Brush}"/></Style>
+    <Style Selector="TextBlock.act.change"><Setter Property="Foreground" Value="{DynamicResource OkBrush}"/></Style>
+    <Style Selector="TextBlock.act.command"><Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/></Style>
+    <Style Selector="TextBlock.act.problem"><Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/></Style>
+  </UserControl.Styles>
+  <Panel>
+    <!-- no workspace yet -->
+    <Border IsVisible="{Binding NoWorkspace}" Classes="card" Width="560" HorizontalAlignment="Center" VerticalAlignment="Center">
+      <StackPanel Spacing="10">
+        <TextBlock Text="Coding mode" Classes="h1"/>
+        <TextBlock TextWrapping="Wrap" Classes="muted"
+                   Text="Pick a project folder on this computer. Nook can read and search files in it. Every file change and command is shown to you first and only happens when you approve it. Nothing outside the folder can be touched."/>
+        <TextBlock Text="Workspace folder" FontWeight="SemiBold" FontSize="13" Margin="0,6,0,0"/>
+        <Grid ColumnDefinitions="*,8,Auto">
+          <TextBox Grid.Column="0" Text="{Binding WorkspacePath}" Watermark="/home/you/projects/my-app">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding OpenWorkspaceCommand}"/>
+            </TextBox.KeyBindings>
+          </TextBox>
+          <Button Grid.Column="2" Content="Browse…" Command="{Binding ChooseFolderCommand}"/>
+        </Grid>
+        <TextBlock Text="{Binding WorkspaceError}" Classes="error" IsVisible="{Binding WorkspaceError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+        <Button Classes="primary" Content="Open folder" Command="{Binding OpenWorkspaceCommand}" HorizontalAlignment="Left" Margin="0,4,0,0"/>
+      </StackPanel>
+    </Border>
+
+    <!-- workspace open -->
+    <DockPanel IsVisible="{Binding HasWorkspace}">
+      <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1" Padding="18,0,12,0" Height="54">
+        <DockPanel VerticalAlignment="Center">
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4">
+            <ToggleSwitch IsChecked="{Binding ApproveAll}" OnContent="Approve all: ON" OffContent="Approve all for this session"
+                          FontSize="12.5" Margin="0,0,8,0"/>
+            <Button Classes="ghost small" Content="Activity" Command="{Binding ToggleActivityCommand}"/>
+            <Button Classes="ghost small" Content="New session" Command="{Binding NewSessionCommand}" IsEnabled="{Binding IsIdle}"/>
+            <Button Classes="ghost small" Content="Change folder" Command="{Binding CloseWorkspaceCommand}"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="99" Padding="9,2">
+              <TextBlock Text="&lt;/&gt; Coding" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+            </Border>
+            <TextBlock Text="{Binding WorkspaceName}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <TextBlock Text="{Binding SessionTokensText}" Classes="muted small" VerticalAlignment="Center"/>
+          </StackPanel>
+        </DockPanel>
+      </Border>
+      <Border DockPanel.Dock="Top" Classes="banner warn" IsVisible="{Binding ApproveAll}">
+        <TextBlock TextWrapping="Wrap" FontWeight="SemiBold" Foreground="{DynamicResource WarnBrush}"
+                   Text="Approve all is ON: file changes and commands run without asking until you turn it off or close the app."/>
+      </Border>
+
+      <Grid ColumnDefinitions="*,Auto">
+        <!-- activity log -->
+        <Border Grid.Column="1" Width="270" IsVisible="{Binding ShowActivity}" Background="{DynamicResource BgBrush}"
+                BorderBrush="{DynamicResource LineBrush}" BorderThickness="1,0,0,0">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Text="ACTIVITY THIS SESSION" Classes="section" Margin="14,14,14,6"/>
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding Activity}" Margin="14,0,10,10">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <StackPanel Margin="0,0,0,7">
+                      <TextBlock Text="{Binding Time}" Classes="muted" FontSize="10.5"/>
+                      <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="12.5" Classes="act"
+                                 Classes.change="{Binding IsChange}" Classes.command="{Binding IsCommand}" Classes.problem="{Binding IsProblem}"/>
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+
+        <DockPanel Grid.Column="0">
+          <!-- bottom: approval card, status, composer -->
+          <StackPanel DockPanel.Dock="Bottom" Margin="16,6,16,14" Spacing="8">
+            <Border Classes="card" Padding="14" MaxWidth="900" IsVisible="{Binding HasApproval}" DataContext="{Binding PendingApproval}"
+                    BorderBrush="{DynamicResource AccentBrush}" BorderThickness="2">
+              <StackPanel Spacing="8">
+                <DockPanel>
+                  <TextBlock DockPanel.Dock="Right" Text="{Binding Stats}" FontFamily="{StaticResource MonoFont}" Classes="muted" VerticalAlignment="Center"/>
+                  <TextBlock Text="{Binding Title}" Classes="h2" Margin="0"/>
+                </DockPanel>
+                <!-- command -->
+                <StackPanel IsVisible="{Binding IsCommand}" Spacing="6">
+                  <Border Background="{DynamicResource CodeBgBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" CornerRadius="10" Padding="12,9">
+                    <SelectableTextBlock Text="{Binding Command, StringFormat='$ {0}'}" FontFamily="{StaticResource MonoFont}" TextWrapping="Wrap"/>
+                  </Border>
+                  <TextBlock Text="{Binding WorkingDir, StringFormat='in {0}'}" Classes="muted small" TextWrapping="Wrap"/>
+                </StackPanel>
+                <!-- diff -->
+                <Border IsVisible="{Binding IsFileChange}" Background="{DynamicResource CodeBgBrush}" BorderBrush="{DynamicResource LineBrush}"
+                        BorderThickness="1" CornerRadius="10" ClipToBounds="True">
+                  <ScrollViewer MaxHeight="300" HorizontalScrollBarVisibility="Auto">
+                    <ItemsControl ItemsSource="{Binding DiffLines}" Margin="0,6">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <Border Classes="diffline" Classes.added="{Binding IsAdded}" Classes.removed="{Binding IsRemoved}" Classes.gap="{Binding IsGap}" Padding="0,0,12,0">
+                            <StackPanel Orientation="Horizontal">
+                              <TextBlock Text="{Binding OldNo}" Width="42" TextAlignment="Right" Classes="muted" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                              <TextBlock Text="{Binding NewNo}" Width="42" TextAlignment="Right" Classes="muted" FontFamily="{StaticResource MonoFont}" FontSize="12" Margin="0,0,10,0"/>
+                              <TextBlock Text="{Binding Text}" FontFamily="{StaticResource MonoFont}" FontSize="12.5"/>
+                            </StackPanel>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+                </Border>
+                <TextBlock Text="No changes (the file would stay the same)." IsVisible="{Binding NoChanges}" Classes="muted small"/>
+                <Grid ColumnDefinitions="*,8,Auto,8,Auto">
+                  <TextBox Grid.Column="0" Text="{Binding RejectNote}" Watermark="Optional note for Nook if you reject" FontSize="13"/>
+                  <Button Grid.Column="2" Classes="danger" Content="Reject" Command="{Binding RejectCommand}"/>
+                  <Button Grid.Column="4" Classes="primary" Content="Approve" Command="{Binding ApproveCommand}"/>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <StackPanel Orientation="Horizontal" Spacing="9" IsVisible="{Binding IsRunning}" MaxWidth="900" HorizontalAlignment="Center">
+              <Ellipse Width="8" Height="8" Fill="{DynamicResource AccentBrush}" VerticalAlignment="Center"/>
+              <TextBlock Text="{Binding StatusText}" Classes="muted"/>
+            </StackPanel>
+
+            <Border MaxWidth="900" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
+                    CornerRadius="20" Padding="14,6,8,6" BoxShadow="0 8 24 0 #14141f1b">
+              <DockPanel>
+                <Panel DockPanel.Dock="Right" VerticalAlignment="Bottom" Margin="6,0,0,2">
+                  <Button Classes="primary" Content="Send" Command="{Binding SendCommand}" IsEnabled="{Binding CanSend}"
+                          IsVisible="{Binding IsIdle}" CornerRadius="14"/>
+                  <Button Content="■ Stop" Command="{Binding StopCommand}" IsVisible="{Binding IsRunning}" CornerRadius="14"/>
+                </Panel>
+                <TextBox x:Name="Composer" Classes="bare" Text="{Binding Input}" AcceptsReturn="True" TextWrapping="Wrap"
+                         MaxHeight="200" MinHeight="40" Watermark="Ask Nook to explain, fix or change something in this folder" FontSize="15"
+                         VerticalContentAlignment="Center"/>
+              </DockPanel>
+            </Border>
+          </StackPanel>
+
+          <!-- transcript -->
+          <ScrollViewer x:Name="Scroller">
+            <ItemsControl ItemsSource="{Binding Items}" Margin="18,18,18,8">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Panel MaxWidth="900" Margin="0,0,0,10">
+                    <Border IsVisible="{Binding IsUser}" HorizontalAlignment="Right" MaxWidth="640"
+                            Background="{DynamicResource UserBrush}" CornerRadius="18,18,6,18" Padding="15,9">
+                      <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap"/>
+                    </Border>
+                    <c:MarkdownView IsVisible="{Binding IsAssistant}" Text="{Binding Text}"/>
+                    <Border IsVisible="{Binding IsNotice}" Classes="notice">
+                      <SelectableTextBlock Text="{Binding Text}" Classes="muted" FontSize="12.5" TextWrapping="Wrap"/>
+                    </Border>
+                    <SelectableTextBlock IsVisible="{Binding IsError}" Text="{Binding Text}" Foreground="{DynamicResource DangerBrush}" TextWrapping="Wrap"/>
+                    <Expander IsVisible="{Binding IsTool}" HorizontalAlignment="Stretch" Padding="10,6" CornerRadius="10">
+                      <Expander.Header>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <TextBlock Text="⚙" Foreground="{DynamicResource AccentBrush}" IsVisible="{Binding !Failed}"/>
+                          <TextBlock Text="!" FontWeight="Bold" Foreground="{DynamicResource DangerBrush}" IsVisible="{Binding Failed}"/>
+                          <TextBlock Text="{Binding Title}" FontFamily="{StaticResource MonoFont}" FontSize="12.5" TextTrimming="CharacterEllipsis" MaxWidth="640"/>
+                          <TextBlock Text="running…" Classes="muted small" IsVisible="{Binding IsRunning}"/>
+                        </StackPanel>
+                      </Expander.Header>
+                      <SelectableTextBlock Text="{Binding Detail}" FontFamily="{StaticResource MonoFont}" FontSize="12" TextWrapping="Wrap"/>
+                    </Expander>
+                  </Panel>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+      </Grid>
+    </DockPanel>
+  </Panel>
+</UserControl>

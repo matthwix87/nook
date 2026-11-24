@@ -1,0 +1,200 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:Nook.App.Views"
+        x:Class="Nook.App.Views.MainWindow"
+        Title="Nook" Width="1180" Height="780" MinWidth="720" MinHeight="480"
+        Icon="avares://Nook/Assets/nook.png">
+  <Panel>
+    <!-- loading -->
+    <StackPanel IsVisible="{Binding IsLoading}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
+      <Image Source="avares://Nook/Assets/nook.png" Width="64" Height="64"/>
+      <TextBlock Text="Connecting to Nook…" Classes="muted" HorizontalAlignment="Center"/>
+    </StackPanel>
+
+    <!-- offline -->
+    <Border IsVisible="{Binding IsOffline}" Classes="card" Width="440" HorizontalAlignment="Center" VerticalAlignment="Center">
+      <StackPanel Spacing="12">
+        <Image Source="avares://Nook/Assets/nook.png" Width="52" Height="52" HorizontalAlignment="Center" Opacity="0.85"/>
+        <TextBlock Text="{Binding OfflineTitle}" Classes="h1" HorizontalAlignment="Center" TextAlignment="Center"/>
+        <TextBlock Text="{Binding OfflineDetail}" Classes="muted" TextWrapping="Wrap" TextAlignment="Center"/>
+        <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsWaiting}" Margin="40,6"/>
+        <TextBlock Text="{Binding WaitText}" IsVisible="{Binding IsWaiting}" Classes="muted small" HorizontalAlignment="Center"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8" Margin="0,6,0,0">
+          <Button Classes="primary" Content="Try again" Command="{Binding RetryCommand}" IsVisible="{Binding IsNotWaiting}"/>
+          <Button Content="Cancel" Command="{Binding CancelWaitCommand}" IsVisible="{Binding IsWaiting}"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- login -->
+    <Border IsVisible="{Binding IsLogin}" Classes="card" Width="400" HorizontalAlignment="Center" VerticalAlignment="Center">
+      <StackPanel Spacing="10">
+        <Image Source="avares://Nook/Assets/nook.png" Width="56" Height="56" HorizontalAlignment="Left"/>
+        <TextBlock Text="Welcome to Nook" Classes="h1" Margin="0,6,0,0"/>
+        <TextBlock Text="Sign in with the username and key you were given." Classes="muted" TextWrapping="Wrap"/>
+        <TextBlock Text="Username" Classes="small" FontWeight="SemiBold" Margin="0,8,0,0"/>
+        <TextBox x:Name="LoginUser" Text="{Binding LoginUsername}" Watermark="your username"/>
+        <TextBlock Text="Key" Classes="small" FontWeight="SemiBold"/>
+        <TextBox Text="{Binding LoginKey}" PasswordChar="•" Watermark="your key">
+          <TextBox.KeyBindings>
+            <KeyBinding Gesture="Enter" Command="{Binding LoginCommand}"/>
+          </TextBox.KeyBindings>
+        </TextBox>
+        <TextBlock Text="{Binding LoginError}" Classes="error" IsVisible="{Binding LoginError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+        <Button Classes="primary" Content="Sign in" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                Command="{Binding LoginCommand}" IsEnabled="{Binding !LoginBusy}" Margin="0,6,0,0"/>
+        <Button Classes="link" Content="Server settings" Command="{Binding ToggleServerSettingsCommand}" HorizontalAlignment="Left"/>
+        <StackPanel IsVisible="{Binding ShowServerSettings}" Spacing="6">
+          <TextBlock Text="Backend URL (leave empty to find it automatically)" Classes="small muted" TextWrapping="Wrap"/>
+          <TextBox Text="{Binding BackendOverride}" Watermark="https://…trycloudflare.com"/>
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <!-- main -->
+    <Grid IsVisible="{Binding IsMain}" ColumnDefinitions="280,*">
+      <!-- sidebar -->
+      <Border Grid.Column="0" Background="{DynamicResource BgBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,1,0">
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top" Margin="14,14,14,6" Spacing="10">
+            <StackPanel Orientation="Horizontal" Spacing="9">
+              <Image Source="avares://Nook/Assets/nook.png" Width="28" Height="28"/>
+              <TextBlock Text="Nook" FontSize="18" FontWeight="Bold" VerticalAlignment="Center"/>
+              <TextBlock Text="{Binding Username, StringFormat='({0})'}" Classes="muted small" VerticalAlignment="Center"/>
+            </StackPanel>
+            <Grid ColumnDefinitions="*,6,*">
+              <Button Grid.Column="0" Classes="primary" Content="+ New chat" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                      Command="{Binding Chat.NewChatCommand}"/>
+              <ToggleButton Grid.Column="2" Content="&lt;/&gt; Code" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                            IsChecked="{Binding IsCodeMode, Mode=OneWay}" Command="{Binding ShowCodeCommand}" CornerRadius="10"/>
+            </Grid>
+            <TextBox Text="{Binding Chat.SearchText}" Watermark="Search chats" FontSize="13"/>
+          </StackPanel>
+
+          <!-- footer: meter + settings -->
+          <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0" Padding="14,10">
+            <StackPanel Spacing="6">
+              <TextBlock Text="{Binding MeterLabel}" FontSize="12.5" FontWeight="Medium"/>
+              <ProgressBar Value="{Binding MeterPercent}" Maximum="100" Height="5" MinHeight="5" CornerRadius="3"
+                           Foreground="{DynamicResource AccentBrush}" Background="{DynamicResource Surface2Brush}"
+                           Classes.empty="{Binding MeterEmpty}"/>
+              <TextBlock Text="{Binding MeterSub}" Classes="muted" FontSize="11.5"/>
+              <DockPanel Margin="-6,4,-6,0">
+                <Button DockPanel.Dock="Right" Classes="ghost small" Content="Log out" Command="{Binding LogoutCommand}"/>
+                <StackPanel Orientation="Horizontal">
+                  <Button Classes="ghost small" Content="Settings" Command="{Binding OpenSettingsCommand}"/>
+                  <Button Classes="ghost small" Content="{Binding ThemeLabel, StringFormat='Theme: {0}'}" Command="{Binding ToggleThemeCommand}"
+                          ToolTip.Tip="Light / dark / follow the system"/>
+                </StackPanel>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+
+          <ScrollViewer Padding="8,0">
+            <StackPanel>
+              <TextBlock Text="PROJECTS" Classes="section" IsVisible="{Binding Chat.HasProjects}"/>
+              <ListBox Classes="side" IsVisible="{Binding Chat.HasProjects}" ItemsSource="{Binding Chat.Projects}" SelectedItem="{Binding Chat.SelectedProject}">
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontSize="13.5"/>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <TextBlock Text="CHATS" Classes="section"/>
+              <TextBlock Text="No chats yet" Classes="muted small" Margin="10,2" IsVisible="{Binding Chat.HasNoChats}"/>
+              <ListBox x:Name="ConvList" Classes="side" ItemsSource="{Binding Chat.Conversations}" SelectedItem="{Binding Chat.SelectedConversation}">
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <StackPanel Background="Transparent">
+                      <StackPanel.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Rename" Command="{Binding #ConvList.DataContext.Chat.RenameCommand}" CommandParameter="{Binding}"/>
+                          <MenuItem Header="{Binding PinLabel}" Command="{Binding #ConvList.DataContext.Chat.TogglePinCommand}" CommandParameter="{Binding}"/>
+                          <MenuItem Header="Delete" Command="{Binding #ConvList.DataContext.Chat.DeleteCommand}" CommandParameter="{Binding}"/>
+                        </ContextMenu>
+                      </StackPanel.ContextMenu>
+                      <DockPanel>
+                        <TextBlock DockPanel.Dock="Right" Text="📌" FontSize="10" IsVisible="{Binding Pinned}" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource AccentBrush}"/>
+                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="13.5"/>
+                      </DockPanel>
+                      <TextBlock Text="{Binding Snippet}" IsVisible="{Binding HasSnippet}" Classes="muted" FontSize="11.5" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <TextBlock Text="Right-click a chat to rename, pin or delete it." Classes="muted" FontSize="11" Margin="10,8" TextWrapping="Wrap"/>
+            </StackPanel>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+
+      <!-- main column -->
+      <DockPanel Grid.Column="1" Background="{DynamicResource SurfaceBrush}">
+        <StackPanel DockPanel.Dock="Top">
+          <Border Classes="banner warn" IsVisible="{Binding HasBanner}">
+            <TextBlock Text="{Binding BannerText}" TextWrapping="Wrap" FontWeight="Medium" Foreground="{DynamicResource WarnBrush}"/>
+          </Border>
+          <Border Classes="banner" IsVisible="{Binding HasAnnouncement}">
+            <TextBlock Text="{Binding Announcement}" TextWrapping="Wrap"/>
+          </Border>
+        </StackPanel>
+        <Panel>
+          <!-- wrappers: IsVisible must bind to this window's view model, not the view's own DataContext -->
+          <Border IsVisible="{Binding IsChatMode}"><views:ChatView DataContext="{Binding Chat}"/></Border>
+          <Border IsVisible="{Binding IsCodeMode}"><views:CodingView DataContext="{Binding Coding}"/></Border>
+        </Panel>
+      </DockPanel>
+    </Grid>
+
+    <!-- settings overlay -->
+    <Panel IsVisible="{Binding IsSettingsOpen}">
+      <Border Background="{DynamicResource ScrimBrush}" PointerPressed="OnScrimPressed"/>
+      <Border Classes="card" Width="520" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Settings" Classes="h2"/>
+          <TextBlock Text="Custom instructions" FontWeight="SemiBold" FontSize="13"/>
+          <TextBlock Text="Nook follows these in every chat (and in coding mode)." Classes="muted small" TextWrapping="Wrap"/>
+          <TextBox Text="{Binding Instructions}" AcceptsReturn="True" TextWrapping="Wrap" Height="140"
+                   Watermark="e.g. I'm learning Python; keep explanations simple."/>
+          <TextBlock Text="{Binding InstructionsCount}" Classes="muted small" HorizontalAlignment="Right"/>
+          <TextBlock Text="Server" FontWeight="SemiBold" FontSize="13"/>
+          <TextBlock Text="{Binding BackendInfo}" Classes="muted small" TextWrapping="Wrap"/>
+          <TextBox Text="{Binding BackendOverride}" Watermark="Backend URL override (empty = find automatically)"/>
+          <TextBlock Text="{Binding SettingsError}" Classes="error" IsVisible="{Binding SettingsError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,6,0,0">
+            <Button Content="Cancel" Command="{Binding CloseSettingsCommand}"/>
+            <Button Classes="primary" Content="Save" Command="{Binding SaveSettingsCommand}" IsEnabled="{Binding !SettingsBusy}"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Panel>
+
+    <!-- dialog overlay (rename / confirm) -->
+    <Panel IsVisible="{Binding Dialog, Converter={x:Static ObjectConverters.IsNotNull}}">
+      <Border Background="{DynamicResource ScrimBrush}"/>
+      <Border Classes="card" Width="420" HorizontalAlignment="Center" VerticalAlignment="Center" DataContext="{Binding Dialog}">
+        <StackPanel Spacing="12">
+          <TextBlock Text="{Binding Title}" Classes="h2"/>
+          <TextBlock Text="{Binding Message}" IsVisible="{Binding HasMessage}" TextWrapping="Wrap" Classes="muted"/>
+          <TextBox Text="{Binding Input}" IsVisible="{Binding HasInput}">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding OkCommand}"/>
+              <KeyBinding Gesture="Escape" Command="{Binding CancelCommand}"/>
+            </TextBox.KeyBindings>
+          </TextBox>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+            <Button Content="Cancel" Command="{Binding CancelCommand}"/>
+            <Button Classes="primary" Classes.danger-fill="{Binding IsDanger}" Content="{Binding OkText}" Command="{Binding OkCommand}"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Panel>
+
+    <!-- toast -->
+    <Border IsVisible="{Binding HasToast}" Background="{DynamicResource TextBrush}" CornerRadius="10" Padding="16,9"
+            HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,28">
+      <TextBlock Text="{Binding ToastText}" Foreground="{DynamicResource SurfaceBrush}"/>
+    </Border>
+  </Panel>
+</Window>

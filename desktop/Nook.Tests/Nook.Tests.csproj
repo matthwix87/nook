@@ -10,9 +10,12 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
     <PackageReference Include="xunit" Version="2.5.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Skia" Version="11.2.3" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Nook.Core\Nook.Core.csproj" />
+    <ProjectReference Include="..\Nook.App\Nook.App.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

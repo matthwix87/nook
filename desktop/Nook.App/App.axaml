@@ -1,0 +1,69 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Nook.App.App"
+             RequestedThemeVariant="Default">
+  <!-- Colors match docs/style.css (the "moss" theme), light and dark. -->
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="BgBrush" Color="#f2f4f1"/>
+          <SolidColorBrush x:Key="SurfaceBrush" Color="#ffffff"/>
+          <SolidColorBrush x:Key="Surface2Brush" Color="#e7ebe7"/>
+          <SolidColorBrush x:Key="HoverBrush" Color="#e2e7e3"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#d5dcd7"/>
+          <SolidColorBrush x:Key="TextBrush" Color="#17201c"/>
+          <SolidColorBrush x:Key="MutedBrush" Color="#5d6a64"/>
+          <SolidColorBrush x:Key="AccentBrush" Color="#2c6b5a"/>
+          <SolidColorBrush x:Key="AccentHoverBrush" Color="#24584a"/>
+          <SolidColorBrush x:Key="AccentInkBrush" Color="#ffffff"/>
+          <SolidColorBrush x:Key="AccentSoftBrush" Color="#dce9e3"/>
+          <SolidColorBrush x:Key="UserBrush" Color="#dde8e2"/>
+          <SolidColorBrush x:Key="CodeBgBrush" Color="#f6f8f6"/>
+          <SolidColorBrush x:Key="DangerBrush" Color="#b93a34"/>
+          <SolidColorBrush x:Key="DangerSoftBrush" Color="#f7e1df"/>
+          <SolidColorBrush x:Key="OkBrush" Color="#2f8a5f"/>
+          <SolidColorBrush x:Key="AddedBrush" Color="#dff1e6"/>
+          <SolidColorBrush x:Key="RemovedBrush" Color="#f9e0de"/>
+          <SolidColorBrush x:Key="WarnBrush" Color="#9a5b00"/>
+          <SolidColorBrush x:Key="WarnSoftBrush" Color="#fbedd2"/>
+          <SolidColorBrush x:Key="ScrimBrush" Color="#730A100D"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="BgBrush" Color="#151a18"/>
+          <SolidColorBrush x:Key="SurfaceBrush" Color="#1c2220"/>
+          <SolidColorBrush x:Key="Surface2Brush" Color="#252c29"/>
+          <SolidColorBrush x:Key="HoverBrush" Color="#2a322f"/>
+          <SolidColorBrush x:Key="LineBrush" Color="#313a36"/>
+          <SolidColorBrush x:Key="TextBrush" Color="#e2e8e4"/>
+          <SolidColorBrush x:Key="MutedBrush" Color="#929f99"/>
+          <SolidColorBrush x:Key="AccentBrush" Color="#6cc3a5"/>
+          <SolidColorBrush x:Key="AccentHoverBrush" Color="#86d2b7"/>
+          <SolidColorBrush x:Key="AccentInkBrush" Color="#0d1c16"/>
+          <SolidColorBrush x:Key="AccentSoftBrush" Color="#223631"/>
+          <SolidColorBrush x:Key="UserBrush" Color="#24332d"/>
+          <SolidColorBrush x:Key="CodeBgBrush" Color="#111614"/>
+          <SolidColorBrush x:Key="DangerBrush" Color="#f07a72"/>
+          <SolidColorBrush x:Key="DangerSoftBrush" Color="#3a2422"/>
+          <SolidColorBrush x:Key="OkBrush" Color="#5cc98f"/>
+          <SolidColorBrush x:Key="AddedBrush" Color="#1d3a2b"/>
+          <SolidColorBrush x:Key="RemovedBrush" Color="#432422"/>
+          <SolidColorBrush x:Key="WarnBrush" Color="#f0b860"/>
+          <SolidColorBrush x:Key="WarnSoftBrush" Color="#3b2e17"/>
+          <SolidColorBrush x:Key="ScrimBrush" Color="#99000000"/>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+      <FontFamily x:Key="MonoFont">Cascadia Mono, JetBrains Mono, DejaVu Sans Mono, Consolas, Menlo, monospace</FontFamily>
+    </ResourceDictionary>
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme>
+      <FluentTheme.Palettes>
+        <ColorPaletteResources x:Key="Light" Accent="#2c6b5a" RegionColor="#ffffff" BaseHigh="#17201c"/>
+        <ColorPaletteResources x:Key="Dark" Accent="#6cc3a5" RegionColor="#1c2220" BaseHigh="#e2e8e4"/>
+      </FluentTheme.Palettes>
+    </FluentTheme>
+    <StyleInclude Source="avares://Nook/Styles.axaml"/>
+  </Application.Styles>
+</Application>

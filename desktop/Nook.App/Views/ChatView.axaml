@@ -1,0 +1,86 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="using:Nook.App.Controls"
+             x:Class="Nook.App.Views.ChatView">
+  <DockPanel>
+    <!-- top bar -->
+    <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1" Padding="18,0" Height="54">
+      <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+        <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="99" Padding="9,2" IsVisible="{Binding HasProjectTag}">
+          <TextBlock Text="{Binding ProjectTag}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+        </Border>
+        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+      </StackPanel>
+    </Border>
+
+    <!-- composer -->
+    <Border DockPanel.Dock="Bottom" Padding="16,6,16,14">
+      <Border MaxWidth="760" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
+              CornerRadius="20" Padding="14,6,8,6" BoxShadow="0 8 24 0 #14141f1b">
+        <DockPanel>
+          <Panel DockPanel.Dock="Right" VerticalAlignment="Bottom" Margin="6,0,0,2">
+            <Button Classes="primary" Content="Send" Command="{Binding SendCommand}" IsEnabled="{Binding CanSend}"
+                    IsVisible="{Binding IsNotStreaming}" CornerRadius="14"/>
+            <Button Content="■ Stop" Command="{Binding StopCommand}" IsVisible="{Binding IsStreaming}" CornerRadius="14"/>
+          </Panel>
+          <TextBox x:Name="Composer" Classes="bare" Text="{Binding Input}" AcceptsReturn="True" TextWrapping="Wrap"
+                   MaxHeight="220" MinHeight="40" Watermark="Message Nook" FontSize="15" VerticalContentAlignment="Center"/>
+        </DockPanel>
+      </Border>
+    </Border>
+
+    <Panel>
+      <!-- empty state -->
+      <StackPanel IsVisible="{Binding IsEmpty}" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="560" Spacing="10">
+        <TextBlock Text="{Binding Greeting}" FontSize="30" FontWeight="SemiBold" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap"/>
+        <TextBlock Text="What can I help with today?" Classes="muted" HorizontalAlignment="Center"/>
+        <WrapPanel HorizontalAlignment="Center" Margin="0,10,0,0">
+          <Button Content="Explain something simply" Margin="4" CornerRadius="99" Command="{Binding UseSuggestionCommand}" CommandParameter="Explain how "/>
+          <Button Content="Help me write" Margin="4" CornerRadius="99" Command="{Binding UseSuggestionCommand}" CommandParameter="Help me write "/>
+          <Button Content="Brainstorm ideas" Margin="4" CornerRadius="99" Command="{Binding UseSuggestionCommand}" CommandParameter="Give me ideas for "/>
+        </WrapPanel>
+      </StackPanel>
+
+      <ScrollViewer x:Name="Scroller" IsVisible="{Binding !IsEmpty}">
+        <ItemsControl ItemsSource="{Binding Messages}" Margin="18,22,18,10">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Panel MaxWidth="760" Margin="0,0,0,14">
+                <!-- user bubble -->
+                <Border IsVisible="{Binding IsUser}" HorizontalAlignment="Right" MaxWidth="600"
+                        Background="{DynamicResource UserBrush}" CornerRadius="18,18,6,18" Padding="15,9">
+                  <StackPanel Spacing="4">
+                    <ItemsControl ItemsSource="{Binding Notices}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate><TextBlock Text="{Binding}" Classes="muted" FontSize="12"/></DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap"/>
+                  </StackPanel>
+                </Border>
+                <!-- assistant -->
+                <StackPanel IsVisible="{Binding IsAssistant}" Spacing="6">
+                  <ItemsControl ItemsSource="{Binding Notices}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border Classes="notice" Margin="0,0,0,4"><TextBlock Text="{Binding}" Classes="muted" FontSize="12.5" TextWrapping="Wrap"/></Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <StackPanel Orientation="Horizontal" Spacing="9" IsVisible="{Binding IsPending}">
+                    <Ellipse Width="8" Height="8" Fill="{DynamicResource AccentBrush}" Classes="pulse"/>
+                    <TextBlock Text="{Binding StatusText}" Classes="muted"/>
+                  </StackPanel>
+                  <TextBlock Text="{Binding Hint}" IsVisible="{Binding HasHint}" Classes="muted small"/>
+                  <c:MarkdownView Text="{Binding Text}" IsVisible="{Binding !IsError}"/>
+                  <SelectableTextBlock Text="{Binding Text}" IsVisible="{Binding IsError}" Foreground="{DynamicResource DangerBrush}" TextWrapping="Wrap"/>
+                  <TextBlock Text="{Binding Meta}" IsVisible="{Binding HasMeta}" Classes="muted" FontSize="11.5"/>
+                </StackPanel>
+              </Panel>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+    </Panel>
+  </DockPanel>
+</UserControl>

@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nook.Core", "Nook.Core\Nook
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nook.Tests", "Nook.Tests\Nook.Tests.csproj", "{BFD25696-510E-49DD-9468-ADD823BD7AB6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nook.App", "Nook.App\Nook.App.csproj", "{C4D3E3F4-3740-4A17-ADC3-81972CDE9A4A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C4D3E3F4-3740-4A17-ADC3-81972CDE9A4A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C4D3E3F4-3740-4A17-ADC3-81972CDE9A4A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C4D3E3F4-3740-4A17-ADC3-81972CDE9A4A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C4D3E3F4-3740-4A17-ADC3-81972CDE9A4A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
