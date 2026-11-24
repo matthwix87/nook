@@ -578,6 +578,7 @@ class Handler(BaseHTTPRequestHandler):
         ("DELETE", r"/api/conversations/(\d+)", "delete_conv"),
         ("POST", r"/api/chat", "chat"),
         ("POST", r"/api/warm", "warm"),
+        ("POST", r"/api/agent", "agent"),
         ("DELETE", r"/api/me", "delete_me"),
         ("POST", r"/api/me/rotate", "rotate_me"),
         ("GET", r"/api/usage", "usage"),
@@ -971,24 +972,12 @@ class Handler(BaseHTTPRequestHandler):
                                                          acc["reply_style"] if style is None else style)
 
         if not owner:
-            with throttle_lock:
-                dq = guest_requests[acc["id"]]
-                if recent(dq, 60) >= CFG["guest_requests_per_minute"]:
-                    raise ApiError(429, "rate_limited", "Slow down a little - too many messages this minute.")
-                dq.append(time.time())
+            self.rate_limit(acc)
 
         Ollama.active += 1
         try:
-            up = Ollama.status()[0]
-            if not up and not CFG["auto_manage_ollama"]:
-                raise ApiError(503, "offline", "The host's computer is offline right now.")
-            # Open the stream now so the page can say "waking up" while Ollama starts / loads the model.
-            starting = Ollama.warming or not up or not Ollama.model_loaded()
-            self.start_stream()
-            if starting:
-                self.event({"type": "status", "state": "starting"})
-            if not Ollama.ensure():  # waits on the same lock as a warm-up that is already starting Ollama
-                return self.event({"type": "error", "error": "offline", "message": "The host's computer is offline right now."})
+            if not self.open_model_stream():
+                return
             now = time.time()
             with LOCK:
                 if conv is None:
@@ -1014,6 +1003,33 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             Ollama.active -= 1
             Ollama.last_activity = time.time()
+
+    def rate_limit(self, acc):
+        """Guests: at most guest_requests_per_minute chat/agent requests per minute."""
+        with throttle_lock:
+            dq = guest_requests[acc["id"]]
+            if recent(dq, 60) >= CFG["guest_requests_per_minute"]:
+                retry = max(1, int(dq[0] + 60 - time.time()) + 1)
+                raise ApiError(429, "rate_limited", "Slow down a little - too many messages this minute.",
+                               retry_after=retry)
+            dq.append(time.time())
+
+    def open_model_stream(self):
+        """Make sure Ollama is up, opening the SSE stream first so the client can say "waking up".
+
+        Returns False (after sending an error event) when Ollama can't be used. Call with Ollama.active raised.
+        """
+        up = Ollama.status()[0]
+        if not up and not CFG["auto_manage_ollama"]:
+            raise ApiError(503, "offline", "The host's computer is offline right now.")
+        starting = Ollama.warming or not up or not Ollama.model_loaded()
+        self.start_stream()
+        if starting:
+            self.event({"type": "status", "state": "starting"})
+        if not Ollama.ensure():  # waits on the same lock as a warm-up that is already starting Ollama
+            self.event({"type": "error", "error": "offline", "message": "The host's computer is offline right now."})
+            return False
+        return True
 
     def build_prompt(self, acc, owner, project, convo, style=""):
         """Fit system text, project files and history into the account's context window.
@@ -1150,6 +1166,168 @@ class Handler(BaseHTTPRequestHandler):
                 event({"type": "done", "assistant_message_id": asst_id,
                        "usage": {"prompt": usage[0], "completion": usage[1], "total": usage[0] + usage[1]},
                        "budget": budget(acc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    # ---- coding mode (desktop app): one stateless model turn with tools; the tools run on the client
+    AGENT_ROLES = ("system", "user", "assistant", "tool")
+
+    def clean_agent_body(self, body):
+        msgs, tools = body.get("messages"), body.get("tools", [])
+        if not isinstance(msgs, list) or not msgs or len(msgs) > 400:
+            raise ApiError(400, "bad_request", "messages must be a list of 1 to 400 messages")
+        if not isinstance(tools, list) or len(tools) > 32:
+            raise ApiError(400, "bad_request", "tools must be a list of at most 32 tools")
+        out = []
+        for m in msgs:
+            if not isinstance(m, dict) or m.get("role") not in self.AGENT_ROLES or not isinstance(m.get("content", ""), str):
+                raise ApiError(400, "bad_request", "Each message needs a role (system, user, assistant or tool) and text content")
+            item = {"role": m["role"], "content": m.get("content", "")}
+            calls = m.get("tool_calls")
+            if calls is not None:
+                if m["role"] != "assistant" or not isinstance(calls, list) or not all(
+                        isinstance(c, dict) and isinstance(c.get("function"), dict)
+                        and isinstance(c["function"].get("name"), str)
+                        and isinstance(c["function"].get("arguments", {}), dict) for c in calls):
+                    raise ApiError(400, "bad_request", "tool_calls must be a list of {function: {name, arguments}}")
+                item["tool_calls"] = [{"function": {"name": c["function"]["name"],
+                                                    "arguments": c["function"].get("arguments", {})}} for c in calls]
+            if m["role"] == "tool" and isinstance(m.get("tool_name"), str):
+                item["tool_name"] = m["tool_name"]
+            out.append(item)
+        if out[-1]["role"] not in ("user", "tool"):
+            raise ApiError(400, "bad_request", "The last message must be from the user or a tool")
+        for t in tools:
+            f = t.get("function") if isinstance(t, dict) else None
+            if not (isinstance(f, dict) and t.get("type") == "function" and isinstance(f.get("name"), str)
+                    and isinstance(f.get("parameters", {}), dict)):
+                raise ApiError(400, "bad_request", "Each tool needs type 'function' and function.name / parameters")
+        return out, tools
+
+    def build_agent_prompt(self, acc, owner, msgs, tools):
+        """Fit an agent conversation into the account's context window.
+
+        Must fit: system text + tools + the last user message + the final step (the last assistant message with
+        its tool results). Then the newer steps after that user message, newest first, then older history.
+        Dropped assistant messages take their tool results with them. Returns (messages, max_reply, trimmed).
+        """
+        ctx = CFG["owner_context_tokens"] if owner else CFG["guest_context_tokens"]
+        reply = CFG["owner_max_reply_tokens"] if owner else CFG["guest_max_reply_tokens"]
+        room = ctx - reply
+        system = [CFG["system_prompt"]] if CFG["system_prompt"] else []
+        if acc["instructions"]:
+            system.append("The user's custom instructions:\n" + acc["instructions"])
+        system += [m["content"] for m in msgs if m["role"] == "system" and m["content"].strip()]
+        rest = [m for m in msgs if m["role"] != "system"]
+        if not rest:
+            raise ApiError(400, "bad_request", "No user message")
+
+        def cost(m):
+            return est(m["content"]) + (est(json.dumps(m["tool_calls"])) if m.get("tool_calls") else 0)
+
+        last_user = max((i for i, m in enumerate(rest) if m["role"] == "user"), default=None)
+        tail = len(rest) - 1
+        while tail > 0 and rest[tail]["role"] == "tool":
+            tail -= 1
+        if rest[tail]["role"] != "assistant":  # the final message is a user message (or orphan tool results)
+            tail = len(rest) - 1
+        keep = set(range(tail, len(rest))) | ({last_user} if last_user is not None else set())
+        fixed = est("\n\n".join(system)) + (est(json.dumps(tools)) if tools else 0) + sum(cost(rest[i]) for i in keep)
+        if fixed > room:
+            raise ApiError(413, "doesnt_fit", f"This task is too big for the context window: about {fixed:,} tokens, "
+                           f"but this account can use about {room:,}. Start a new session or ask for something smaller.",
+                           needed=fixed, limit=room)
+        room -= fixed
+        lu = -1 if last_user is None else last_user
+        for section in (range(tail - 1, lu, -1), range(lu - 1, -1, -1)):
+            for i in section:
+                if i in keep:
+                    continue
+                if cost(rest[i]) > room:
+                    break
+                room -= cost(rest[i])
+                keep.add(i)
+        owner_kept = False  # tool results only stay with the assistant message that asked for them
+        for i, m in enumerate(rest):
+            if m["role"] == "assistant":
+                owner_kept = i in keep
+            elif m["role"] == "tool" and not owner_kept:
+                keep.discard(i)
+        trimmed = len(rest) - len(keep)
+        messages = ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + \
+            [rest[i] for i in sorted(keep)]
+        return messages, reply, trimmed
+
+    def agent(self):
+        acc = self.authenticate()
+        self.check_open(acc)
+        body = self.read_json()
+        owner = bool(acc["is_owner"])
+        msgs, tools = self.clean_agent_body(body)
+        if not owner and budget(acc)["total_left"] <= 0:
+            raise ApiError(402, "no_tokens", "You're out of tokens for today. The daily allowance resets at midnight.",
+                           resets_at=next_midnight())
+        messages, max_reply, trimmed = self.build_agent_prompt(acc, owner, msgs, tools)
+        if not owner:
+            self.rate_limit(acc)
+        Ollama.active += 1
+        try:
+            if not self.open_model_stream():
+                return
+            self.stream_agent(acc, messages, tools, max_reply, trimmed)
+        finally:
+            Ollama.active -= 1
+            Ollama.last_activity = time.time()
+
+    def stream_agent(self, acc, messages, tools, max_reply, trimmed):
+        payload = {"model": CFG["model"], "messages": messages, "stream": True, "think": False,
+                   "options": {**Ollama.load_options(), "num_predict": max_reply}}
+        if tools:
+            payload["tools"] = tools
+        req = urllib.request.Request(CFG["ollama_url"] + "/api/chat", data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=600)
+        except Exception as e:
+            log("ollama request failed:", e)
+            return self.event({"type": "error", "error": "offline", "message": "The model is not responding right now."})
+        usage, client_gone, produced = None, False, 0
+        with resp:  # closing it drops the upstream connection, which stops generation
+            try:
+                self.event({"type": "status", "state": "ready"})
+                if trimmed:
+                    self.event({"type": "notice", "message": "Older steps were left out to fit the context window "
+                                                             f"({trimmed} message{'s' if trimmed != 1 else ''})."})
+                for line in resp:
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        self.event({"type": "error", "error": "model", "message": "The model returned an error."})
+                        log("ollama error:", chunk["error"])
+                        break
+                    msg = chunk.get("message") or {}
+                    if msg.get("content"):
+                        produced += 1
+                        self.event({"type": "delta", "text": msg["content"]})
+                    if msg.get("tool_calls"):
+                        produced += 1
+                        self.event({"type": "tool_calls", "tool_calls": msg["tool_calls"]})
+                    if chunk.get("done"):
+                        usage = (chunk.get("prompt_eval_count", 0), chunk.get("eval_count", 0))
+                        break
+            except (BrokenPipeError, ConnectionResetError):
+                client_gone = True
+            except Exception as e:
+                log("agent stream error:", type(e).__name__, e)
+        if usage is None:  # stopped or failed: prompt estimate + what was produced
+            usage = (sum(est(m["content"]) for m in messages), produced)
+        acc = charge(acc["id"], usage[0] + usage[1])
+        if not client_gone and acc:
+            try:
+                self.event({"type": "done", "usage": {"prompt": usage[0], "completion": usage[1],
+                                                      "total": usage[0] + usage[1]},
+                            "budget": budget(acc), "trimmed": trimmed})
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

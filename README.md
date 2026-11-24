@@ -63,6 +63,10 @@ own domain and put that URL in `backend.json` once.
   get its instructions and files. Deleting a project asks whether to keep its chats (unassigned) or delete them.
 - Code blocks have **Open**: a side panel (bottom sheet on phones) with Copy, Download and, for HTML, a
   Preview tab rendered in a sandboxed iframe (`sandbox="allow-scripts"`, no same-origin access).
+- **Coding mode (desktop app)**: `POST /api/agent` relays one stateless model turn with tool definitions
+  (the tools themselves run on the user's computer, never here). Same gates as chat (Nook off, maintenance,
+  budget, guest rate limit with `retry_after`), tokens charged, context trimmed to the account's window.
+  Spec: `desktop/GATEWAY_API.md`.
 - **Warm-up**: when you start typing, the site calls `POST /api/warm` (at most every 5 minutes) so the
   proxy starts Ollama and loads the model with the same `num_ctx` as chats. No tokens charged; one per
   account per minute; disabled or out-of-budget accounts are refused.
@@ -197,7 +201,7 @@ pick up a new version.
 
 ## Tests
 
-`python3 tests/test_gateway.py` starts its own proxy on port 8797 with a temporary data dir and runs the
+`python3 tests/test_gateway.py` starts its own proxy on port 8797 (`TEST_PORT`/`TEST_FAKE_PORT` override the ports) with a temporary data dir and runs the
 end-to-end checks against a fake Ollama (`tests/fake_ollama.py`, port 11597) that the proxy auto-starts
 and auto-stops through `OLLAMA_ON_CMD`/`OLLAMA_OFF_CMD`. It never touches `data/` or the real Ollama.
 It also migrates an old-schema database and, if `data/gateway.db` exists, a copy of it in a temp dir.

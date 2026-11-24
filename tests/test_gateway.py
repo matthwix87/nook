@@ -21,8 +21,8 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PORT = 8797
-FAKE_PORT = 11597
+PORT = int(os.environ.get("TEST_PORT", "8797"))  # override if another test run is using the port
+FAKE_PORT = int(os.environ.get("TEST_FAKE_PORT", "11597"))
 FAKE = f"http://127.0.0.1:{FAKE_PORT}"
 BASE = f"http://127.0.0.1:{PORT}"
 DATA = tempfile.mkdtemp(prefix="gateway-test-")
@@ -66,8 +66,21 @@ def req(method, path, body=None, auth=None, headers=None, raw=False, timeout=300
 
 def chat(auth, message, conv=None, **extra):
     """Returns (status, events) - events parsed from the SSE stream."""
-    resp = req("POST", "/api/chat", {"message": message, "conversation_id": conv, **extra}, auth=auth, raw=True,
-               timeout=600)
+    return sse_post("/api/chat", {"message": message, "conversation_id": conv, **extra}, auth)
+
+
+def agent(auth, messages, tools=None):
+    """Coding-mode turn (POST /api/agent). Returns (status, events) like chat()."""
+    return sse_post("/api/agent", {"messages": messages, "tools": TOOLS if tools is None else tools}, auth)
+
+
+TOOLS = [{"type": "function", "function": {"name": "read_file", "description": "Read a file",
+                                           "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                                                          "required": ["path"]}}}]
+
+
+def sse_post(path, body, auth):
+    resp = req("POST", path, body, auth=auth, raw=True, timeout=600)
     if resp.status != 200:
         return resp.status, json.loads(resp.read())
     events = []
@@ -664,7 +677,87 @@ def run_feature_tests():
     s, body, _ = req("POST", "/api/projects", {"name": "  "}, auth=OWNER)
     check("project needs a name", s == 400)
     run_account_tests(OWNER, BOB, CAROL)
+    run_agent_tests(OWNER)
     run_system_tests(OWNER, CAROL)
+
+
+def run_agent_tests(OWNER):
+    """Coding mode: POST /api/agent relays one model turn with tools; nothing is stored."""
+    s, _, _ = req("POST", "/api/agent", {"messages": [{"role": "user", "content": "hi"}]})
+    check("agent: unauthenticated rejected", s == 401)
+    bad = [{}, {"messages": []}, {"messages": [{"role": "robot", "content": "x"}]},
+           {"messages": [{"role": "user", "content": 5}]},
+           {"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}]},
+           {"messages": [{"role": "user", "content": "x"}], "tools": "nope"},
+           {"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function"}]},
+           {"messages": [{"role": "assistant", "content": "", "tool_calls": [{"function": {"name": 1}}]},
+                         {"role": "user", "content": "x"}]}]
+    codes = [req("POST", "/api/agent", b, auth=OWNER)[0] for b in bad]
+    check("agent: malformed bodies rejected with 400", codes == [400] * len(bad), codes)
+
+    convs_before = len(req("GET", "/api/conversations", auth=OWNER)[1])
+    task = [{"role": "system", "content": "CODING_MODE_RULES"}, {"role": "user", "content": "TOOL please read it"}]
+    s, ev = agent(OWNER, task)
+    calls = [e for e in ev if e["type"] == "tool_calls"] if s == 200 else []
+    last = fake("/_last")
+    check("agent: streams the model's tool call and finishes with usage",
+          s == 200 and calls and calls[0]["tool_calls"][0]["function"] == {"name": "read_file",
+                                                                             "arguments": {"path": "README.md"}}
+          and done_of(ev)["usage"]["total"] == 57 and done_of(ev)["trimmed"] == 0, ev)
+    check("agent: tools passed to Ollama, think off, same num_ctx as chats, one system message (Nook first)",
+          last["tools"] == TOOLS and last["think"] is False
+          and last["options"]["num_ctx"] == fake("/_stats")["loads"][0]["num_ctx"]
+          and [m["role"] for m in last["messages"]] == ["system", "user"]
+          and last["messages"][0]["content"].startswith("You are Nook")
+          and "CODING_MODE_RULES" in last["messages"][0]["content"], last)
+    step2 = task + [{"role": "assistant", "content": "", "tool_calls": calls[0]["tool_calls"] if calls else []},
+                    {"role": "tool", "tool_name": "read_file", "content": "README_CONTENTS here"}]
+    s, ev = agent(OWNER, step2)
+    last = fake("/_last")
+    check("agent: tool results go back to the model, answer streams as text",
+          s == 200 and reply_of(ev) == "done: README_CONTENTS here" and last["messages"][-1] ==
+          {"role": "tool", "content": "README_CONTENTS here", "tool_name": "read_file"}
+          and last["messages"][-2]["tool_calls"][0]["function"]["name"] == "read_file", (ev, last["messages"]))
+    check("agent: stateless - no conversation stored",
+          len(req("GET", "/api/conversations", auth=OWNER)[1]) == convs_before)
+
+    # Guests: tokens charged, context trimmed to their (small) window, clear error when it can't fit.
+    FRAN = new_guest(OWNER, "fran_test")
+    before = req("GET", "/api/me", auth=FRAN)[1]["total_tokens"]
+    s, ev = agent(FRAN, task)
+    after = req("GET", "/api/me", auth=FRAN)[1]
+    check("agent: guest is charged the turn's tokens", s == 200 and after["total_tokens"] - before == 57
+          and done_of(ev)["budget"]["daily_left"] == after["daily_allowance"] - after["daily_used"], (before, after))
+    long_steps = [{"role": "user", "content": "TASK_START fix the bug"}]
+    for i in range(8):
+        long_steps += [{"role": "assistant", "content": "", "tool_calls": [
+                           {"function": {"name": "read_file", "arguments": {"path": f"f{i}.py"}}}]},
+                       {"role": "tool", "tool_name": "read_file", "content": f"STEP{i} " + "x" * 6000}]
+    GINA = new_guest(OWNER, "gina_test")
+    s, ev = agent(GINA, long_steps)
+    sent = fake("/_last")["messages"]
+    roles = [m["role"] for m in sent]
+    orphan = any(r == "tool" and roles[i - 1] not in ("assistant", "tool") for i, r in enumerate(roles))
+    notice = [e for e in ev if e["type"] == "notice"] if s == 200 else []
+    check("agent: guest context trimmed (oldest steps first), task + latest step kept, no orphan tool results",
+          s == 200 and done_of(ev)["trimmed"] > 0 and notice and "left out" in notice[0]["message"]
+          and any("TASK_START" in m["content"] for m in sent) and "STEP7" in sent[-1]["content"]
+          and "STEP0" not in json.dumps(sent) and not orphan
+          and sum(est(m["content"]) for m in sent) <= 8192 - 1024, (s, roles))
+    s, body = agent(GINA, [{"role": "user", "content": "y" * 30000}])
+    check("agent: too big for the context window -> 413 doesnt_fit with needed/limit",
+          s == 413 and body["error"] == "doesnt_fit" and body["needed"] > body["limit"], body)
+
+    # Guest rate limit is shared with chat (3/min in tests) and says when to retry.
+    HANK = new_guest(OWNER, "hank_test")
+    codes = [agent(HANK, task)[0] for _ in range(3)]
+    s, body = agent(HANK, task)
+    check("agent: guest rate limit -> 429 with retry_after", codes == [200] * 3 and s == 429
+          and body["error"] == "rate_limited" and 1 <= body["retry_after"] <= 61, (codes, s, body))
+    s, b, _ = req("POST", "/api/admin/accounts", {"username": "ivy_test", "daily_allowance": 0}, auth=OWNER)
+    KEYS_SEEN.append(b["key"])
+    s, body = agent(("ivy_test", b["key"]), task)
+    check("agent: out of tokens -> 402", s == 402 and body["error"] == "no_tokens", body)
 
 
 def cli(*args):
@@ -759,12 +852,16 @@ def run_system_tests(OWNER, CAROL):
     s1, b1 = chat(DAVE, "hi")
     s2, _ = chat(OWNER, "hi")
     s3 = req("POST", "/api/warm", auth=DAVE)[0]
+    ma, mb = agent(DAVE, [{"role": "user", "content": "hi"}])
+    mo, _ = agent(OWNER, [{"role": "user", "content": "hi"}])
     st = req("GET", "/status")[1]
     req("PATCH", "/api/admin/system", {"maintenance": False}, auth=OWNER)
     s4, _ = chat(DAVE, "hi")
     check("maintenance: guests refused (chat + warm), owner can chat, off again works",
           s1 == 503 and b1["error"] == "maintenance" and s2 == 200 and s3 == 503 and st["maintenance"] and s4 == 200,
           (s1, s2, s3, s4))
+    check("maintenance: agent refused for guests, allowed for the owner", ma == 503 and mb["error"] == "maintenance"
+          and mo == 200, (ma, mo))
 
     # ---- Nook off: stops Ollama, refuses everyone, never starts it, survives via DB, CLI works
     chat(OWNER, "make sure Ollama is up")
@@ -775,9 +872,11 @@ def run_system_tests(OWNER, CAROL):
     s1, b1 = chat(OWNER, "hi")
     s2 = req("POST", "/api/warm", auth=OWNER)[0]
     s3, b3 = chat(DAVE, "hi")
+    s4, b4 = agent(OWNER, [{"role": "user", "content": "TOOL"}])
     time.sleep(1)
-    check("nook off: chat and warm refused for everyone incl. owner, Ollama not started",
-          s1 == 503 and b1["error"] == "nook_off" and s2 == 503 and s3 == 503 and not ollama_up(), (s1, s2, s3))
+    check("nook off: chat, warm and agent refused for everyone incl. owner, Ollama not started",
+          s1 == 503 and b1["error"] == "nook_off" and s2 == 503 and s3 == 503 and s4 == 503
+          and b4["error"] == "nook_off" and not ollama_up(), (s1, s2, s3, s4))
     codes = [req("GET", "/api/me", auth=OWNER)[0], req("GET", "/api/conversations", auth=DAVE)[0],
              req("GET", "/api/settings", auth=DAVE)[0], req("GET", "/api/admin/accounts", auth=OWNER)[0]]
     check("nook off: login, history, settings, admin still work", codes == [200] * 4 and req("GET", "/status")[1]["nook_off"])

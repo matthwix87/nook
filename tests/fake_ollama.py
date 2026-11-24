@@ -8,6 +8,8 @@ Usage: python3 tests/fake_ollama.py PORT
 - If it asks for "last number", replies "10" (history test).
 - An empty messages list is a load request (warm-up); its options are recorded in /_stats "loads".
 - GET /api/ps lists the model once it has been used. FAKE_START_DELAY (s) delays startup.
+- With "tools" in the request (coding mode): a last user message containing "TOOL" gets a tool call
+  (read_file README.md) and no text; a last "tool" message gets "done: <first 20 chars of the result>".
 - GET /_last returns the last /api/chat request body; GET /_stats returns {"cancelled": n, "sent": n}.
 """
 import json
@@ -51,7 +53,22 @@ class H(BaseHTTPRequestHandler):
             return self.send({"model": MODEL, "done": True, "done_reason": "load"})
         STATE["last"] = body
         last = next((m["content"] for m in reversed(body["messages"]) if m["role"] == "user"), "")
-        if "CODE" in last:
+        final = body["messages"][-1]
+        if body.get("tools") and final["role"] == "user" and "TOOL" in final["content"]:
+            call = {"function": {"name": "read_file", "arguments": {"path": "README.md"}}}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            self.wfile.write(json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": [call]},
+                                         "done": False}).encode() + b"\n")
+            self.wfile.write(json.dumps({"done": True, "prompt_eval_count": 50, "eval_count": 7}).encode() + b"\n")
+            STATE["sent"] = 1
+            return
+        if body.get("tools") and final["role"] == "tool":
+            last = "done: " + final["content"][:20]
+        if last.startswith("done: "):
+            tokens, delay = [last], 0
+        elif "CODE" in last:
             text = ("Here is a small page:\n\n```html\n<!doctype html>\n<html><body style=\"font-family:sans-serif\">\n"
                     "  <h1>Hello from Nook</h1>\n  <button onclick=\"this.textContent='Clicked'\">Click me</button>\n"
                     "</body></html>\n```\n\nAnd the same idea in **Python**:\n\n```python\nprint('hello')\n```\n\n"
