@@ -21,6 +21,8 @@ const state = {
   streaming: false,
   abort: null,
   attachments: [],   // [{name, content, size}] waiting to be sent
+  offline: false,    // backend unreachable: showing cached data read-only
+  status: {},        // last /status: nook_off, maintenance, announcement, available
 };
 
 // ---------------------------------------------------------------- icons
@@ -50,6 +52,7 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/>',
   moon: '<path d="M19.5 14.5A8 8 0 1 1 9.5 4.5a6.3 6.3 0 0 0 10 10Z"/>',
   auto: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/>',
+  share: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 13v5.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V13"/>',
   open: '<path d="M14 4h6v6M20 4l-8.5 8.5M10 5H6a1.5 1.5 0 0 0-1.5 1.5v11.5A1.5 1.5 0 0 0 6 19.5h11.5A1.5 1.5 0 0 0 19 18v-4"/>',
 };
 
@@ -116,7 +119,7 @@ async function copyText(text) {
 }
 
 function show(view) {
-  for (const v of ["loading", "offline", "disabled", "login", "chat", "admin"]) {
+  for (const v of ["loading", "disabled", "login", "chat", "admin"]) {
     $("#view-" + v).hidden = v !== view;
   }
 }
@@ -193,74 +196,137 @@ async function api(path, { method = "GET", body, timeout = 20000 } = {}) {
 // Central handling for errors that change the whole screen.
 function handleError(e) {
   const code = e.body && e.body.error;
-  if (e.status === 0 || code === "offline") return showOffline(e.message);
+  if (e.status === 0 || code === "offline") return goOffline();
   if (code === "disabled") return showDisabled(e.body.until);
   if (code === "bad_login") { logout("Your login is no longer valid."); return; }
+  if (code === "nook_off" || code === "maintenance") refreshStatus();
   toast(e.message);
 }
 
-async function checkStatus() {
-  try {
-    const s = await api("/status", { timeout: 8000 });
-    if (!s.available) {
-      showOffline(s.ollama && !s.model_available
-        ? "The model isn't available on the host right now."
-        : "The host's computer is offline. Try again later.");
-      return false;
+// ---------------------------------------------------------------- banners
+// One reusable strip at the top of every screen. setBanner(id, null) removes it.
+const banners = new Map();
+function setBanner(id, opts) {
+  if (opts) banners.set(id, opts); else banners.delete(id);
+  const order = ["offline", "nook_off", "maintenance", "unavailable", "announcement"];
+  $("#banners").replaceChildren(...order.filter((k) => banners.has(k)).map((k) => {
+    const b = banners.get(k);
+    return el("div", { class: "banner " + (b.kind || "info"), role: "status" },
+      b.spinner ? el("span", { class: "spinner", "aria-hidden": "true" }) : null,
+      el("span", { class: "banner-text" }, el("b", {}, b.text), b.sub ? el("span", { class: "banner-sub" }, b.sub) : null),
+      (b.actions || []).map((a) => el("button", { class: "btn", type: "button", onclick: a.onclick }, a.label)),
+      b.dismiss ? el("button", { class: "x", type: "button", "aria-label": "Dismiss", onclick: b.dismiss }, "×") : null);
+  }));
+}
+
+// ---------------------------------------------------------------- status
+async function fetchStatus() {
+  try { return await api("/status", { timeout: 8000 }); } catch { return null; }
+}
+
+function applyStatus(s) {
+  state.status = s;
+  const owner = state.me && state.me.is_owner;
+  setBanner("nook_off", s.nook_off && { text: "Nook is switched off by the owner right now.", kind: "off",
+    sub: "You can still read your chats." });
+  setBanner("maintenance", s.maintenance && !s.nook_off && {
+    text: owner ? "Maintenance mode is on." : "Nook is down for maintenance.", kind: "warn",
+    sub: owner ? "Only you can chat." : "Try again a bit later." });
+  setBanner("unavailable", !s.available && !s.nook_off && { text: "The model isn't available on the host right now.", kind: "warn" });
+  const ann = s.announcement || "";
+  setBanner("announcement", ann && load("dismissed") !== ann && { text: ann, kind: "info",
+    dismiss: () => { store("dismissed", ann); setBanner("announcement", null); } });
+  updateComposer();
+}
+
+async function refreshStatus() {
+  if (state.offline) return;
+  const s = await fetchStatus();
+  if (!s) return goOffline();
+  applyStatus(s);
+}
+setInterval(() => { if (!document.hidden && state.auth) refreshStatus(); }, 60000);
+
+// Composer is disabled (with a short reason) while offline, switched off, or in maintenance.
+function updateComposer() {
+  const s = state.status || {};
+  const owner = state.me && state.me.is_owner;
+  const reason = state.offline ? "Offline - saved chats are read-only."
+    : s.nook_off ? "Nook is switched off right now."
+    : s.maintenance && !owner ? "Chatting is paused for maintenance." : "";
+  input.disabled = !!reason;
+  $("#send").disabled = $("#attach-btn").disabled = !!reason || state.streaming;
+  $("#chat-style").disabled = !!reason;
+  input.placeholder = reason || "Message Nook";
+}
+
+// ---------------------------------------------------------------- offline mode
+// When the host can't be reached, the app keeps running on what this browser cached
+// (chat list, opened chats, projects, settings) and checks back every 5 s for 3 minutes.
+// Each check re-reads backend.json, because the tunnel URL changes when the host restarts.
+const cache = {
+  key: () => "nook-cache:" + state.auth.username.toLowerCase(),
+  get() { try { return (state.auth && JSON.parse(localStorage.getItem(this.key()))) || {}; } catch { return {}; } },
+  save(c) {
+    for (let i = 0; i < 3; i++) {
+      try { localStorage.setItem(this.key(), JSON.stringify(c)); return; }
+      catch { (c.order || []).splice(0, Math.ceil((c.order || []).length / 2)).forEach((id) => delete c.chats[id]); }
     }
-    return true;
-  } catch {
-    showOffline("The host's computer is offline. Try again later.");
-    return false;
-  }
-}
+  },
+  put(field, value) { if (!state.auth) return; const c = this.get(); c[field] = value; this.save(c); },
+  putChat(conv) {  // keep the 25 most recently opened chats
+    if (!state.auth) return;
+    const c = this.get();
+    c.chats = c.chats || {};
+    c.order = (c.order || []).filter((id) => id !== conv.id);
+    c.chats[conv.id] = conv;
+    c.order.push(conv.id);
+    while (c.order.length > 25) delete c.chats[c.order.shift()];
+    this.save(c);
+  },
+  clear() { try { localStorage.removeItem(this.key()); } catch {} },
+};
 
-function showOffline(detail) {
-  stopWaiting();
-  $("#offline-title").textContent = "Currently not working";
-  $("#offline-detail").textContent = detail || "The host's computer is offline. Try again later.";
-  show("offline");
-}
-
-// "Try again": re-check every 5 s for up to 3 minutes. Each attempt re-reads backend.json,
-// because the tunnel URL changes when the host restarts. (The site can't switch a PC on.)
 const WAIT_MS = 3 * 60 * 1000;
 let waitEnd = 0, waitTimer = null, waitClock = null;
 
+function goOffline() {
+  if (state.offline) { toast("Not available while the host is offline"); return; }
+  state.offline = true;
+  if (state.abort) state.abort.abort();
+  startWaiting();
+  updateComposer();
+}
+
+function offlineBanner(mode) {
+  const s = Math.max(0, Math.ceil((waitEnd - Date.now()) / 1000));
+  if (mode === "waiting") {
+    setBanner("offline", { text: "Host computer offline temporarily.", kind: "warn", spinner: true,
+      sub: `Retrying - ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`,
+      actions: [{ label: "Cancel", onclick: () => { stopWaiting(); offlineBanner("idle"); } }] });
+  } else {
+    setBanner("offline", { text: mode === "gaveup" ? "Unavailable right now." : "Host computer offline temporarily.",
+      kind: "warn", sub: mode === "gaveup" ? "The host's computer may be switched off or restarting." : "",
+      actions: [{ label: "Try again", onclick: startWaiting }] });
+  }
+}
+
 async function backendUp() {
   if (!sessionStorage.getItem("backend")) state.backend = await resolveBackend();
-  try { return (await api("/status", { timeout: 4000 })).available; } catch { return false; }
-}
-
-function setWaitingUI(on) {
-  $("#offline-spinner").hidden = $("#offline-wait").hidden = $("#offline-cancel").hidden = !on;
-  $("#offline-mark").hidden = $("#offline-retry").hidden = on;
-}
-
-function updateWaitClock() {
-  const s = Math.max(0, Math.ceil((waitEnd - Date.now()) / 1000));
-  $("#offline-wait").textContent = `Checking every few seconds - ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`;
+  return !!(await fetchStatus());
 }
 
 function startWaiting() {
   stopWaiting();
   waitEnd = Date.now() + WAIT_MS;
-  $("#offline-title").textContent = "Waiting for the host";
-  $("#offline-detail").textContent = "Nook opens as soon as the host's computer is reachable again.";
-  setWaitingUI(true);
-  updateWaitClock();
-  waitClock = setInterval(updateWaitClock, 1000);
+  offlineBanner("waiting");
+  waitClock = setInterval(() => offlineBanner("waiting"), 1000);
   const attempt = async () => {
     waitTimer = null;
     const up = await backendUp();
     if (!waitClock) return;  // cancelled meanwhile
-    if (up) { stopWaiting(); return boot(); }
-    if (Date.now() >= waitEnd) {
-      stopWaiting();
-      $("#offline-title").textContent = "Unavailable right now";
-      $("#offline-detail").textContent = "Still no answer from the host's computer. It may be switched off or restarting.";
-      return;
-    }
+    if (up) { stopWaiting(); return backOnline(); }
+    if (Date.now() >= waitEnd) { stopWaiting(); return offlineBanner("gaveup"); }
     waitTimer = setTimeout(attempt, 5000);
   };
   attempt();
@@ -270,19 +336,19 @@ function stopWaiting() {
   clearTimeout(waitTimer);
   clearInterval(waitClock);
   waitTimer = waitClock = null;
-  setWaitingUI(false);
 }
 
-$("#offline-cancel").addEventListener("click", () => {
-  stopWaiting();
-  $("#offline-title").textContent = "Currently not working";
-  $("#offline-detail").textContent = "The host's computer is offline. Try again later.";
-});
+function backOnline() {
+  state.offline = false;
+  setBanner("offline", null);
+  boot();  // refreshes everything from the server
+}
 
 // Coming back to the tab: check once.
 document.addEventListener("visibilitychange", async () => {
-  if (document.hidden || $("#view-offline").hidden || waitClock) return;
-  if (await backendUp()) boot();
+  if (document.hidden || !state.auth && !state.offline) return;
+  if (!state.offline) return refreshStatus();
+  if (!waitClock && await backendUp()) backOnline();
 });
 
 function showDisabled(until) {
@@ -292,13 +358,24 @@ function showDisabled(until) {
 
 // ---------------------------------------------------------------- boot / login
 async function boot() {
-  show("loading");
+  if ($("#view-chat").hidden) show("loading");
   if (!state.backend) state.backend = await resolveBackend();
-  if (!(await checkStatus())) return;
   state.auth = load("auth");
-  if (!state.auth) return show("login");
+  const s = await fetchStatus();
+  if (!s) {
+    goOffline();
+    if (!state.auth) return show("login");
+    state.me = cache.get().me || state.me || { username: state.auth.username, is_owner: false };
+    return enterChat();
+  }
+  state.offline = false;
+  stopWaiting();
+  setBanner("offline", null);
+  if (!state.auth) { applyStatus(s); return show("login"); }
   try {
     state.me = await api("/api/me");
+    cache.put("me", state.me);
+    applyStatus(s);
     await enterChat();
   } catch (e) {
     if (e.status === 401) { logout(); return; }
@@ -308,6 +385,7 @@ async function boot() {
 
 function logout(message) {
   if (state.abort) state.abort.abort();
+  if (state.auth) cache.clear();  // don't leave this account's chats on a shared device
   state.auth = null;
   state.me = null;
   state.conv = null;
@@ -330,19 +408,20 @@ $("#login-form").addEventListener("submit", async (ev) => {
     state.me = await api("/api/login", { method: "POST" });
     state.auth.username = state.me.username;
     store("auth", state.auth);
+    cache.put("me", state.me);
+    applyStatus(state.status);
     await enterChat();
   } catch (e) {
     const code = e.body && e.body.error;
     state.auth = null;
     if (code === "disabled") return showDisabled(e.body.until);
-    if (e.status === 0) return showOffline();
+    if (e.status === 0) { goOffline(); err.textContent = "Can't reach the host right now."; err.hidden = false; return; }
     err.textContent = e.message;
     err.hidden = false;
   }
 });
 
 document.querySelectorAll("[data-action=logout]").forEach((b) => b.addEventListener("click", () => logout()));
-$("#offline-retry").addEventListener("click", startWaiting);
 $("#disabled-retry").addEventListener("click", boot);
 
 // ---------------------------------------------------------------- chat shell
@@ -352,12 +431,23 @@ async function enterChat() {
   updateMeter(state.me.budget);
   show("chat");
   if (load("collapsed") && !isPhone()) $("#view-chat").classList.add("collapsed");
-  try { Object.assign(state.limits, await api("/api/settings")); } catch {}
+  const settings = await cached("/api/settings", "settings");
+  if (settings) Object.assign(state.limits, settings);
+  updateComposer();
   await Promise.all([loadConvs(), loadProjects()]);
   const saved = load("convId");
   if (saved && state.convs.some((c) => c.id === saved)) await openConv(saved);
   else newChat();
   if (location.hash === "#admin" && state.me.is_owner) openAdmin();
+}
+
+// GET with a local copy: online it refreshes the cache, offline it returns the cached value (or undefined).
+async function cached(path, field) {
+  if (!state.offline) {
+    try { const d = await api(path); cache.put(field, d); return d; }
+    catch (e) { if (e.status !== 0) { handleError(e); return undefined; } goOffline(); }
+  }
+  return cache.get()[field];
 }
 
 function updateMeter(b) {
@@ -391,8 +481,7 @@ $("#scrim").addEventListener("click", () => { closeDrawer(); closePanel(); });
 
 // ---------------------------------------------------------------- projects
 async function loadProjects() {
-  try { state.projects = await api("/api/projects"); }
-  catch (e) { return handleError(e); }
+  state.projects = (await cached("/api/projects", "projects")) || [];
   if (state.projectId && !state.projects.some((p) => p.id === state.projectId)) state.projectId = null;
   renderProjects();
 }
@@ -428,8 +517,7 @@ function selectProject(id) {
 
 // ---------------------------------------------------------------- conversation list
 async function loadConvs() {
-  try { state.convs = await api("/api/conversations"); }
-  catch (e) { return handleError(e); }
+  state.convs = (await cached("/api/conversations", "convs")) || [];
   const open = state.conv && state.conv.id && state.convs.find((c) => c.id === state.conv.id);
   if (open && open.title !== state.conv.title) { state.conv.title = open.title; renderTitle(); }
   if (state.search) await runSearch();
@@ -448,6 +536,11 @@ $("#chat-search").addEventListener("input", () => {
 
 async function runSearch() {
   if (!state.search) { state.searchResults = null; return; }
+  if (state.offline) {  // titles only, from the cached list
+    const t = state.search.toLowerCase();
+    state.searchResults = state.convs.filter((c) => c.title.toLowerCase().includes(t));
+    return;
+  }
   try { state.searchResults = await api("/api/conversations?q=" + encodeURIComponent(state.search)); }
   catch (e) { handleError(e); }
 }
@@ -530,7 +623,8 @@ function renderTitle() {
   const p = projectById(c ? c.project_id : null);
   $("#chat-project").hidden = !p;
   $("#chat-project").textContent = p ? p.name : "";
-  $("#rename-chat").hidden = $("#delete-chat").hidden = !(c && c.id);
+  $("#rename-chat").hidden = $("#delete-chat").hidden = $("#share-chat").hidden = !(c && c.id);
+  renderStyle();
 }
 
 function greeting() {
@@ -566,8 +660,21 @@ function newChat() {
 async function openConv(id) {
   if (state.streaming) return;
   let conv;
-  try { conv = await api("/api/conversations/" + id); }
-  catch (e) { return handleError(e); }
+  if (!state.offline) {
+    try { conv = await api("/api/conversations/" + id); cache.putChat(conv); }
+    catch (e) { if (e.status !== 0) return handleError(e); goOffline(); }
+  }
+  if (!conv) conv = (cache.get().chats || {})[id];
+  if (!conv) {
+    const c = state.convs.find((x) => x.id === id) || { id, title: "Chat" };
+    state.conv = { ...c, messages: [] };
+    renderTitle();
+    $("#messages").replaceChildren(el("div", { class: "offline-note" },
+      el("h3", {}, "Not available offline"),
+      el("p", {}, "This chat wasn't saved on this device. It will load when the host is back.")));
+    renderConvs();
+    return;
+  }
   state.conv = conv;
   store("convId", id);
   renderTitle();
@@ -704,7 +811,7 @@ function setStreaming(on) {
   state.streaming = on;
   $("#send").hidden = on;
   $("#stop").hidden = !on;
-  $("#attach-btn").disabled = on;
+  updateComposer();
 }
 
 // File attachments: text/code only, checked here and again on the server.
@@ -763,6 +870,7 @@ function sendNew(text, attachments) {
     attachments: attachments.map(({ name, content }) => ({ name, content })),
   };
   if (!state.conv.id && state.conv.project_id) body.project_id = state.conv.project_id;
+  if (!state.conv.id && state.conv.reply_style != null) body.reply_style = state.conv.reply_style;
   stream(body, userNode, { text, attachments });
 }
 
@@ -824,6 +932,7 @@ async function stream(body, userNode, restore) {
         state.attachments = restore.attachments;
         renderAttachments();
       }
+      if (code === "nook_off" || code === "maintenance") refreshStatus();
       if (body.edit_message_id || body.regenerate) openConv(state.conv.id);  // resync with the server
       return fail(e.message);
     }
@@ -863,7 +972,7 @@ async function stream(body, userNode, restore) {
           statusText.textContent = ev.state === "starting" ? "Waking up Nook…" : "Thinking…";
         } else if (ev.type === "error") {
           fail(ev.message);
-          if (ev.error === "offline") checkStatus();
+          if (ev.error === "offline") refreshStatus();
         }
       }
     }
@@ -874,7 +983,7 @@ async function stream(body, userNode, restore) {
       if (!failed) paint();
     } else if (!reply) {
       msg.remove();
-      if (!(await checkStatus())) return;
+      if (!(await fetchStatus())) return goOffline();
       toast("Connection lost - try again.");
     }
   } finally {
@@ -1046,27 +1155,178 @@ function bindCounter(form, name) {
 // Settings: custom instructions + theme
 const settingsForm = $("#settings-form");
 const updateSettingsCounter = bindCounter(settingsForm, "instructions");
+function settingsTab(tab) {
+  document.querySelectorAll("[data-stab]").forEach((t) => t.classList.toggle("active", t.dataset.stab === tab));
+  document.querySelectorAll("[data-spane]").forEach((p) => (p.hidden = p.dataset.spane !== tab));
+  $("#settings-save").hidden = tab !== "general";
+  if (tab === "usage") loadUsage();
+}
+document.querySelectorAll("[data-stab]").forEach((t) => t.addEventListener("click", () => settingsTab(t.dataset.stab)));
+
 $("#open-settings").addEventListener("click", async () => {
-  let s;
-  try { s = await api("/api/settings"); } catch (e) { return handleError(e); }
+  const s = await cached("/api/settings", "settings");
+  if (!s) return;
   settingsForm.instructions.value = s.instructions;
   settingsForm.instructions.maxLength = s.max_instructions_chars;
+  settingsForm.reply_style.value = s.reply_style || "";
   settingsForm.theme.value = currentTheme();
+  settingsForm.text.value = display().text || "";
+  settingsForm.density.value = display().density || "";
   updateSettingsCounter();
   $("#settings-error").hidden = true;
+  $("#my-keybox").hidden = true;
+  $("#delete-me-row").hidden = !!(state.me && state.me.is_owner);
+  settingsTab("general");
   $("#settings-dialog").showModal();
 });
-settingsForm.addEventListener("change", (ev) => { if (ev.target.name === "theme") applyTheme(ev.target.value); });
+settingsForm.addEventListener("change", (ev) => {
+  if (ev.target.name === "theme") applyTheme(ev.target.value);
+  if (ev.target.name === "text" || ev.target.name === "density") {
+    applyDisplay({ ...display(), [ev.target.name]: ev.target.value });
+  }
+});
 settingsForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   if (ev.submitter && ev.submitter.value === "cancel") return $("#settings-dialog").close();
-  try { await api("/api/settings", { method: "PATCH", body: { instructions: settingsForm.instructions.value } }); }
-  catch (e) {
+  let saved;
+  try {
+    saved = await api("/api/settings", { method: "PATCH",
+      body: { instructions: settingsForm.instructions.value, reply_style: settingsForm.reply_style.value } });
+  } catch (e) {
     if (e.status === 400) { $("#settings-error").textContent = e.message; $("#settings-error").hidden = false; return; }
     return handleError(e);
   }
+  cache.put("settings", saved);
   $("#settings-dialog").close();
   toast("Settings saved");
+});
+
+// Text size + density: stored on this device only.
+const display = () => load("display") || {};
+function applyDisplay(d) {
+  store("display", d);
+  const root = document.documentElement;
+  if (d.text) root.dataset.text = d.text; else delete root.dataset.text;
+  if (d.density) root.dataset.density = d.density; else delete root.dataset.density;
+}
+
+async function loadUsage() {
+  let u;
+  try { u = await api("/api/usage"); } catch (e) { $("#usage-summary").textContent = "Usage isn't available offline."; return; }
+  const today = u.days[u.days.length - 1];
+  const b = u.budget;
+  $("#usage-summary").textContent = b.unlimited
+    ? `Today: ${fmt(today.tokens)} tokens in ${fmt(today.replies)} replies. Your account is unlimited.`
+    : `Today: ${fmt(today.tokens)} tokens. Daily allowance ${fmt(b.daily_allowance)} (${fmt(b.daily_left)} left), ` +
+      `refills at ${new Date(b.resets_at * 1000).toLocaleTimeString([], { timeStyle: "short" })}. Top-up balance: ${fmt(b.topup)}.`;
+  const max = Math.max(1, ...u.days.map((d) => d.tokens));
+  $("#usage-chart").replaceChildren(...u.days.map((d) => el("div", {
+    class: "bar" + (d.tokens ? "" : " zero"), style: `height:${Math.max(1, (d.tokens / max) * 100)}%`,
+    title: `${d.day}: ${fmt(d.tokens)} tokens, ${d.replies} replies`,
+  })));
+  $("#usage-from").textContent = new Date(u.days[0].day + "T12:00").toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type + ";charset=utf-8" }));
+  const a = el("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const fileStamp = () => new Date().toISOString().slice(0, 10);
+const who = (role) => (role === "user" ? "You" : "Nook");
+
+function chatMarkdown(title, messages) {
+  return `# ${title}\n\n` + messages.map((m) =>
+    `**${who(m.role)}:**${(m.attachments || []).length ? ` _(attached: ${m.attachments.map((a) => a.name).join(", ")})_` : ""}\n\n${m.content}\n`
+  ).join("\n");
+}
+
+async function exportChats(kind) {
+  let data;
+  try { data = await api("/api/export", { timeout: 60000 }); } catch (e) { return handleError(e); }
+  if (kind === "json") return download(`nook-export-${data.username}-${fileStamp()}.json`, JSON.stringify(data, null, 2), "application/json");
+  const md = data.conversations.map((c) => chatMarkdown(c.title + (c.project ? ` (${c.project})` : ""), c.messages)).join("\n---\n\n");
+  download(`nook-export-${data.username}-${fileStamp()}.md`, md, "text/markdown");
+}
+$("#export-json").addEventListener("click", () => exportChats("json"));
+$("#export-md").addEventListener("click", () => exportChats("md"));
+
+$("#rotate-me").addEventListener("click", async () => {
+  if (!confirm("Change your key? The current key stops working immediately, also on your other devices.")) return;
+  let r;
+  try { r = await api("/api/me/rotate", { method: "POST" }); } catch (e) { return handleError(e); }
+  state.auth.key = r.key;  // keep this device signed in with the new key
+  store("auth", state.auth);
+  $("#my-key").textContent = r.key;
+  $("#my-keybox").hidden = false;
+});
+$("#my-key-copy").addEventListener("click", () => copyText($("#my-key").textContent));
+
+$("#delete-me").addEventListener("click", () => {
+  const dlg = $("#delete-me-dialog");
+  const form = dlg.querySelector("form");
+  form.reset();
+  $("#delete-me-error").hidden = true;
+  dlg.showModal();
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (!ev.submitter || ev.submitter.value !== "delete") return dlg.close();
+    try { await api("/api/me", { method: "DELETE", body: { confirm: form.confirm.value.trim() } }); }
+    catch (e) {
+      if (e.status === 400) { $("#delete-me-error").textContent = e.message; $("#delete-me-error").hidden = false; return; }
+      return handleError(e);
+    }
+    dlg.close();
+    $("#settings-dialog").close();
+    logout("Your account was deleted.");
+  };
+});
+
+// Per-chat reply style (new chats send it with the first message).
+function renderStyle() {
+  const v = state.conv && state.conv.reply_style;
+  $("#chat-style").value = v == null ? "inherit" : v;
+}
+$("#chat-style").addEventListener("change", async (ev) => {
+  const v = ev.target.value === "inherit" ? null : ev.target.value;
+  state.conv.reply_style = v;
+  if (!state.conv.id) return;
+  try { await api("/api/conversations/" + state.conv.id, { method: "PATCH", body: { reply_style: v } }); }
+  catch (e) { handleError(e); }
+});
+
+// Share one chat as a self-contained file.
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+function chatHtml(title, messages) {
+  const body = messages.map((m) => `<div class="m ${m.role}"><div class="who">${who(m.role)}</div><div class="t">${esc(m.content)}</div></div>`).join("\n");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title><style>
+body{margin:0;background:#f2f4f1;color:#17201c;font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:32px 16px}h1{font-size:1.4rem;margin:0 0 4px}.sub{color:#5d6a64;font-size:.85rem;margin-bottom:24px}
+.m{margin:0 0 18px}.who{font-size:.78rem;font-weight:600;color:#5d6a64;margin-bottom:2px}.t{white-space:pre-wrap;overflow-wrap:anywhere}
+.user .t{background:#dde8e2;border-radius:14px;padding:.6rem .9rem}
+@media (prefers-color-scheme:dark){body{background:#151a18;color:#e2e8e4}.who,.sub{color:#929f99}.user .t{background:#24332d}}
+</style></head><body><main><h1>${esc(title)}</h1><div class="sub">Shared from Nook - ${esc(new Date().toLocaleString())}</div>
+${body}</main></body></html>`;
+}
+const shareName = () => (state.conv.title || "chat").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-").slice(0, 50) || "chat";
+$("#share-chat").addEventListener("click", () => $("#share-dialog").showModal());
+async function currentChat() {  // fresh copy (includes replies added since it was opened)
+  if (state.offline) return (cache.get().chats || {})[state.conv.id] || state.conv;
+  try { const c = await api("/api/conversations/" + state.conv.id); cache.putChat(c); return c; }
+  catch (e) { handleError(e); return null; }
+}
+$("#share-html").addEventListener("click", async () => {
+  const c = await currentChat();
+  if (c) download(shareName() + ".html", chatHtml(c.title, c.messages || []), "text/html");
+});
+$("#share-md").addEventListener("click", async () => {
+  const c = await currentChat();
+  if (c) download(shareName() + ".md", chatMarkdown(c.title, c.messages || []), "text/markdown");
 });
 
 // Projects
@@ -1176,7 +1436,50 @@ $("#project-delete").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- admin
-function openAdmin() { history.replaceState(null, "", "#admin"); show("admin"); loadAccounts(); }
+function openAdmin() {
+  if (state.offline) return toast("Not available while the host is offline");
+  history.replaceState(null, "", "#admin");
+  show("admin");
+  loadAccounts();
+  loadSystem();
+  loadActivity();
+}
+
+async function loadSystem() {
+  try { renderSystem(await api("/api/admin/system")); } catch (e) { handleError(e); }
+}
+function renderSystem(sys) {
+  $("#sys-nook-off").checked = sys.nook_off;
+  $("#sys-maintenance").checked = sys.maintenance;
+  $("#sys-announcement").value = sys.announcement;
+}
+async function saveSystem(body, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return loadSystem();
+  try { renderSystem(await api("/api/admin/system", { method: "PATCH", body })); }
+  catch (e) { handleError(e); return loadSystem(); }
+  refreshStatus();
+}
+$("#sys-nook-off").addEventListener("change", (ev) => saveSystem({ nook_off: ev.target.checked },
+  ev.target.checked ? "Switch Nook off? The model is stopped now and nobody can chat (you neither) until you switch it back on." : null));
+$("#sys-maintenance").addEventListener("change", (ev) => saveSystem({ maintenance: ev.target.checked }));
+$("#sys-announce-save").addEventListener("click", () => {
+  saveSystem({ announcement: $("#sys-announcement").value });
+  toast($("#sys-announcement").value.trim() ? "Announcement shown to everyone" : "Announcement cleared");
+});
+
+async function loadActivity() {
+  let a;
+  try { a = await api("/api/admin/activity"); } catch (e) { return handleError(e); }
+  const cell = (replies, tokens) => el("td", {}, `${fmt(replies)} replies `, el("span", { class: "muted" }, `${fmt(tokens)} tok`));
+  $("#activity-rows").replaceChildren(...a.accounts.map((x) => el("tr", {},
+    el("td", {}, x.username), cell(x.replies_today, x.tokens_today), cell(x.replies_7d, x.tokens_7d),
+    el("td", { class: "muted" }, fmtTime(x.last_active)))));
+  const max = Math.max(1, ...a.hours_7d);
+  $("#hours-chart").replaceChildren(...a.hours_7d.map((n, h) => el("div", {
+    class: "bar" + (n ? "" : " zero"), style: `height:${Math.max(1, (n / max) * 100)}%`,
+    title: `${String(h).padStart(2, "0")}:00 - ${n} replies`,
+  })));
+}
 $("#open-admin").addEventListener("click", openAdmin);
 $("#admin-back").addEventListener("click", () => {
   history.replaceState(null, "", location.pathname + location.search);
@@ -1329,6 +1632,7 @@ function accountCard(a) {
 // ---------------------------------------------------------------- start
 hydrateIcons();
 applyTheme(currentTheme());
+applyDisplay(display());
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }

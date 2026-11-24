@@ -10,29 +10,20 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
   <script>
     // Apply the saved theme before first paint (no flash).
-    try { var t = JSON.parse(localStorage.getItem("theme")); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+    try { var t = JSON.parse(localStorage.getItem("theme")); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      var d = JSON.parse(localStorage.getItem("display")) || {}; if (d.text) document.documentElement.dataset.text = d.text; if (d.density) document.documentElement.dataset.density = d.density; } catch (e) {}
   </script>
 </head>
 <body>
+  <!-- Banners: host offline, Nook off, maintenance, announcement (built by app.js) -->
+  <div id="banners" class="banners" aria-live="polite"></div>
+
   <!-- Loading -->
   <section id="view-loading" class="center-view">
     <div class="spinner" aria-label="Loading"></div>
-  </section>
-
-  <!-- Offline / not working -->
-  <section id="view-offline" class="center-view" hidden>
-    <div class="card narrow">
-      <div class="status-mark off" aria-hidden="true" id="offline-mark"></div>
-      <div class="spinner wait-spinner" aria-hidden="true" id="offline-spinner" hidden></div>
-      <h1 id="offline-title">Currently not working</h1>
-      <p class="muted" id="offline-detail">The host's computer is offline. Try again later.</p>
-      <p class="muted wait-text" id="offline-wait" role="status" hidden></p>
-      <button class="btn primary" id="offline-retry">Try again</button>
-      <button class="btn" id="offline-cancel" hidden>Cancel</button>
-    </div>
   </section>
 
   <!-- Disabled -->
@@ -112,6 +103,7 @@
           <span id="chat-title">New chat</span>
         </div>
         <button class="icon-btn" id="rename-chat" aria-label="Rename chat" title="Rename chat" data-icon="edit" hidden></button>
+        <button class="icon-btn" id="share-chat" aria-label="Share chat" title="Share chat as a file" data-icon="share" hidden></button>
         <button class="icon-btn" id="delete-chat" aria-label="Delete chat" title="Delete chat" data-icon="trash" hidden></button>
       </header>
       <div id="messages" class="messages"></div>
@@ -122,6 +114,13 @@
           <div class="composer-row">
             <button class="icon-btn" id="attach-btn" type="button" aria-label="Attach text files" title="Attach text or code files" data-icon="clip"></button>
             <input id="file-input" type="file" multiple hidden>
+            <select id="chat-style" class="style-pick" aria-label="Reply style for this chat" title="Reply style for this chat">
+              <option value="inherit">Style: my default</option>
+              <option value="">Style: normal</option>
+              <option value="short">Style: short</option>
+              <option value="detailed">Style: detailed</option>
+              <option value="beginner">Style: explain simply</option>
+            </select>
             <span class="composer-hint muted" id="composer-hint"></span>
             <button class="send-btn" id="send" type="submit" aria-label="Send" title="Send" data-icon="send"></button>
             <button class="send-btn stop" id="stop" type="button" aria-label="Stop" title="Stop" data-icon="stop" hidden></button>
@@ -153,6 +152,24 @@
       <span class="icon-spacer"></span>
     </header>
     <div class="admin-body">
+      <div class="card" id="system-card">
+        <h2>Nook status</h2>
+        <label class="switch-row"><input type="checkbox" id="sys-nook-off">
+          <span><b>Switch Nook off</b><span class="field-help">Stops the model now to free the GPU and refuses all chats, yours too. Everything else keeps working.</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="sys-maintenance">
+          <span><b>Maintenance mode</b><span class="field-help">Only you can chat. Everyone else sees a maintenance note.</span></span></label>
+        <label>Announcement <span class="field-help">Shown at the top for everyone. Leave empty for none.</span>
+          <div class="row gap"><input id="sys-announcement" maxlength="300"><button class="btn small" type="button" id="sys-announce-save">Save</button></div>
+        </label>
+      </div>
+      <div class="card" id="activity-card">
+        <h2>Activity</h2>
+        <p class="field-help">Replies and tokens per account. Counts only - chat content is never shown here.</p>
+        <div class="table-wrap"><table class="activity"><thead><tr><th>Account</th><th>Today</th><th>7 days</th><th>Last active</th></tr></thead><tbody id="activity-rows"></tbody></table></div>
+        <div class="hours-head">Busiest hours, last 7 days</div>
+        <div class="usage-chart hours" id="hours-chart"></div>
+        <div class="usage-axis muted"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+      </div>
       <form class="card" id="create-form">
         <h2>Create account</h2>
         <div class="grid3">
@@ -178,25 +195,103 @@
   </section>
 
   <!-- Settings dialog -->
-  <dialog id="settings-dialog" class="dialog">
+  <dialog id="settings-dialog" class="dialog wide">
     <form method="dialog" id="settings-form">
       <h2>Settings</h2>
-      <label>Custom instructions
-        <span class="field-help">Nook reads these before every chat. For example how you'd like answers written, or things to keep in mind about you.</span>
-        <textarea name="instructions" rows="7" maxlength="2000"></textarea>
-        <span class="counter" data-counter-for="instructions"></span>
-      </label>
-      <fieldset class="theme-pick">
-        <legend>Theme</legend>
-        <label><input type="radio" name="theme" value="system"> System</label>
-        <label><input type="radio" name="theme" value="light"> Light</label>
-        <label><input type="radio" name="theme" value="dark"> Dark</label>
-      </fieldset>
+      <div class="tabs settings-tabs" role="tablist">
+        <button class="tab active" type="button" data-stab="general">General</button>
+        <button class="tab" type="button" data-stab="usage">Usage</button>
+        <button class="tab" type="button" data-stab="account">Account</button>
+      </div>
+      <section data-spane="general">
+        <label>Custom instructions
+          <span class="field-help">Nook reads these before every chat. For example how you'd like answers written, or things to keep in mind about you.</span>
+          <textarea name="instructions" rows="6" maxlength="2000"></textarea>
+          <span class="counter" data-counter-for="instructions"></span>
+        </label>
+        <label>Reply style
+          <span class="field-help">Your default for new chats. You can change it per chat next to the message box.</span>
+          <select name="reply_style">
+            <option value="">Normal</option>
+            <option value="short">Short</option>
+            <option value="detailed">Detailed</option>
+            <option value="beginner">Explain like I'm new</option>
+          </select>
+        </label>
+        <fieldset class="theme-pick">
+          <legend>Theme</legend>
+          <label><input type="radio" name="theme" value="system"> System</label>
+          <label><input type="radio" name="theme" value="light"> Light</label>
+          <label><input type="radio" name="theme" value="dark"> Dark</label>
+        </fieldset>
+        <fieldset class="theme-pick">
+          <legend>Text size <span class="field-help inline">(this device)</span></legend>
+          <label><input type="radio" name="text" value="small"> Small</label>
+          <label><input type="radio" name="text" value=""> Medium</label>
+          <label><input type="radio" name="text" value="large"> Large</label>
+        </fieldset>
+        <fieldset class="theme-pick">
+          <legend>Density <span class="field-help inline">(this device)</span></legend>
+          <label><input type="radio" name="density" value=""> Comfortable</label>
+          <label><input type="radio" name="density" value="compact"> Compact</label>
+        </fieldset>
+      </section>
+      <section data-spane="usage" hidden>
+        <p id="usage-summary"></p>
+        <div class="usage-chart" id="usage-chart" aria-label="Tokens per day, last 30 days"></div>
+        <div class="usage-axis muted"><span id="usage-from"></span><span>Today</span></div>
+      </section>
+      <section data-spane="account" hidden>
+        <div class="setting-row">
+          <div><b>Export my chats</b><span class="field-help">Everything you've written, with your projects and instructions.</span></div>
+          <div class="row gap"><button class="btn small" type="button" id="export-json">JSON</button><button class="btn small" type="button" id="export-md">Markdown</button></div>
+        </div>
+        <div class="setting-row">
+          <div><b>Change my key</b><span class="field-help">Your current key stops working right away, here and on other devices.</span></div>
+          <button class="btn small" type="button" id="rotate-me">Change key</button>
+        </div>
+        <div class="card keybox" id="my-keybox" hidden>
+          <b>Your new key</b>
+          <p class="field-help">Shown only once. Save it now - you'll need it to sign in on other devices.</p>
+          <div class="row gap"><code id="my-key" class="keytext"></code><button class="btn small" type="button" id="my-key-copy">Copy</button></div>
+        </div>
+        <div class="setting-row" id="delete-me-row">
+          <div><b>Delete my account</b><span class="field-help">Deletes your chats, projects and files for good.</span></div>
+          <button class="btn small danger" type="button" id="delete-me">Delete account</button>
+        </div>
+      </section>
       <p class="error" id="settings-error" hidden></p>
       <div class="dialog-actions">
         <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
         <button class="btn primary" value="save" id="settings-save">Save</button>
       </div>
+    </form>
+  </dialog>
+
+  <!-- Delete account dialog -->
+  <dialog id="delete-me-dialog" class="dialog">
+    <form method="dialog">
+      <h2>Delete your account?</h2>
+      <p class="muted">This deletes your chats, projects and files and can't be undone. Type your username to confirm.</p>
+      <label>Username <input name="confirm" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
+      <p class="error" id="delete-me-error" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary danger-fill" value="delete">Delete my account</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Share dialog -->
+  <dialog id="share-dialog" class="dialog">
+    <form method="dialog">
+      <h2>Share this chat</h2>
+      <p class="muted">Download it as a file you can send to someone. Attached files aren't included.</p>
+      <div class="row gap">
+        <button class="btn" type="button" id="share-html"><span data-icon="download"></span>Web page (.html)</button>
+        <button class="btn" type="button" id="share-md"><span data-icon="download"></span>Markdown (.md)</button>
+      </div>
+      <div class="dialog-actions"><button class="btn ghost" value="cancel">Close</button></div>
     </form>
   </dialog>
 
@@ -258,6 +353,6 @@
   </dialog>
 
   <div id="toast" class="toast" hidden role="status"></div>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
