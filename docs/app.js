@@ -607,6 +607,14 @@ function autoGrow() {
   input.style.height = input.scrollHeight + "px";
 }
 input.addEventListener("input", autoGrow);
+
+// Preload the model when the user starts typing (fire-and-forget, at most every 5 minutes).
+let lastWarm = 0;
+input.addEventListener("input", () => {
+  if (!input.value.trim() || Date.now() - lastWarm < 5 * 60 * 1000 || !state.auth) return;
+  lastWarm = Date.now();
+  fetch(state.backend + "/api/warm", { method: "POST", headers: { Authorization: authHeader() } }).catch(() => {});
+});
 input.addEventListener("keydown", (ev) => {
   // Enter sends on desktop; on touch devices Enter makes a newline. Shift+Enter is always a newline.
   if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && !matchMedia("(pointer: coarse)").matches) {

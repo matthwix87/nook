@@ -6,6 +6,7 @@ Usage: python3 tests/fake_ollama.py PORT
 - If it contains "CODE", replies with markdown holding an html and a python code block.
 - If the last user message contains "SLOW", streams 300 tokens 30 ms apart (for stop tests).
 - If it asks for "last number", replies "10" (history test).
+- An empty messages list is a load request (warm-up); its options are recorded in /_stats "loads".
 - GET /_last returns the last /api/chat request body; GET /_stats returns {"cancelled": n, "sent": n}.
 """
 import json
@@ -14,7 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = "qwen3.8:27b"
-STATE = {"last": None, "cancelled": 0, "sent": 0}
+STATE = {"last": None, "cancelled": 0, "sent": 0, "loads": []}
 
 
 class H(BaseHTTPRequestHandler):
@@ -35,11 +36,14 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/_last":
             return self.send(STATE["last"])
         if self.path == "/_stats":
-            return self.send({"cancelled": STATE["cancelled"], "sent": STATE["sent"]})
+            return self.send({"cancelled": STATE["cancelled"], "sent": STATE["sent"], "loads": STATE["loads"]})
         self.send_error(404)
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if not body["messages"]:  # model load request (warm-up)
+            STATE["loads"].append(body.get("options"))
+            return self.send({"model": MODEL, "done": True, "done_reason": "load"})
         STATE["last"] = body
         last = next((m["content"] for m in reversed(body["messages"]) if m["role"] == "user"), "")
         if "CODE" in last:

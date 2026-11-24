@@ -304,6 +304,38 @@ class Ollama:
             log("Ollama did not come up in time")
             return False
 
+    @staticmethod
+    def load_options():
+        """Load-time options shared by chats and warm-ups (a different num_ctx would reload the model)."""
+        return {"num_ctx": CFG["owner_context_tokens"]}
+
+    warming = False
+    warm_lock = threading.Lock()
+
+    @classmethod
+    def warm(cls):
+        """Background: start Ollama if needed (same path as chat) and load the model. One at a time."""
+        with cls.warm_lock:
+            if cls.warming:
+                return
+            cls.warming = True
+        cls.active += 1
+        try:
+            if cls.ensure():  # starts Ollama if down + auto-manage on; refreshes the idle timer
+                req = urllib.request.Request(
+                    CFG["ollama_url"] + "/api/chat",
+                    data=json.dumps({"model": CFG["model"], "messages": [], "stream": False,
+                                     "options": cls.load_options()}).encode(),
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=CFG["ollama_start_timeout_s"] + 300) as r:
+                    r.read()
+        except Exception as e:
+            log("warm-up failed:", type(e).__name__, e)
+        finally:
+            cls.active -= 1
+            cls.last_activity = time.time()
+            cls.warming = False
+
     @classmethod
     def idle_watcher(cls):
         """Stop Ollama after it sat idle, but only if this proxy started it."""
@@ -321,6 +353,7 @@ class Ollama:
 # ---------------------------------------------------------------- throttles
 auth_failures = defaultdict(deque)   # ip -> timestamps of failed logins
 guest_requests = defaultdict(deque)  # account id -> timestamps of chat requests
+warm_requests = {}                   # account id -> time of the last warm-up it triggered
 throttle_lock = threading.Lock()
 
 
@@ -491,6 +524,7 @@ class Handler(BaseHTTPRequestHandler):
         ("PATCH", r"/api/conversations/(\d+)", "edit_conv"),
         ("DELETE", r"/api/conversations/(\d+)", "delete_conv"),
         ("POST", r"/api/chat", "chat"),
+        ("POST", r"/api/warm", "warm"),
         ("GET", r"/api/settings", "get_settings"),
         ("PATCH", r"/api/settings", "edit_settings"),
         ("GET", r"/api/projects", "list_projects"),
@@ -620,6 +654,20 @@ class Handler(BaseHTTPRequestHandler):
         self.own_conv(acc, conv_id)
         q("DELETE FROM conversations WHERE id=?", (conv_id,))
         self.send_json(200, {"ok": True})
+
+    # ---- warm-up (preload the model while the user types)
+    def warm(self):
+        acc = self.authenticate()  # also rejects disabled accounts
+        if not acc["is_owner"] and budget(acc)["total_left"] <= 0:
+            raise ApiError(402, "no_tokens", "You're out of tokens for today.", resets_at=next_midnight())
+        with throttle_lock:
+            last = warm_requests.get(acc["id"], 0)
+            started = time.time() - last >= 60
+            if started:
+                warm_requests[acc["id"]] = time.time()
+        if started:
+            threading.Thread(target=Ollama.warm, daemon=True).start()
+        self.send_json(202, {"ok": True, "started": started})
 
     # ---- custom instructions
     def get_settings(self):
@@ -886,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model": CFG["model"], "messages": messages, "stream": True, "think": False,
                 # Same num_ctx for everyone so Ollama never reloads the model; guests get
                 # a smaller window because build_prompt trims their history.
-                "options": {"num_ctx": CFG["owner_context_tokens"], "num_predict": max_reply},
+                "options": {**Ollama.load_options(), "num_predict": max_reply},
             }).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -1020,6 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
         q("DELETE FROM accounts WHERE id=?", (acc_id,))
         with throttle_lock:
             guest_requests.pop(acc_id, None)  # ids can be reused by the next account
+            warm_requests.pop(acc_id, None)
         log("account deleted:", acc["username"])
         self.send_json(200, {"ok": True})
 

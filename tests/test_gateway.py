@@ -402,10 +402,49 @@ def chat_and_stop(auth, message, after=5):
     return conv
 
 
+def wait_for(cond, seconds):
+    for _ in range(int(seconds * 4)):
+        if cond():
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def run_warm_tests(OWNER, BOB, CAROL):
+    check("warm: precondition - Ollama is down (idle-stopped)", not ollama_up())
+    s, body, _ = req("POST", "/api/warm")
+    check("warm: unauthenticated rejected", s == 401)
+    t0 = time.time()
+    s, body, _ = req("POST", "/api/warm", auth=BOB)
+    check("warm: returns 202 immediately", s == 202 and body["started"] and time.time() - t0 < 1, (s, body))
+    loaded = wait_for(lambda: ollama_up() and fake("/_stats")["loads"], 20)
+    check("warm: starts Ollama when down and loads the model", loaded)
+    s2, body2, _ = req("POST", "/api/warm", auth=BOB)
+    check("warm: second call within 60s is a no-op", s2 == 202 and body2["started"] is False, body2)
+    me = req("GET", "/api/me", auth=BOB)[1]
+    check("warm: charges no tokens", me["daily_used"] == 0 and me["total_tokens"] == 0, me)
+    # Idle timeout is 15s; a second warm-up at ~10s must keep it alive at ~22s.
+    time.sleep(10)
+    req("POST", "/api/warm", auth=CAROL)
+    time.sleep(12)
+    check("warm: refreshes the idle timer (Ollama not stopped)", ollama_up())
+    chat(OWNER, "hello")
+    loads = fake("/_stats")["loads"]
+    check("warm: load uses the same num_ctx as chats",
+          loads and all(o == {"num_ctx": fake("/_last")["options"]["num_ctx"]} for o in loads), loads)
+    s, b, _ = req("POST", "/api/admin/accounts", {"username": "broke_test", "daily_allowance": 0}, auth=OWNER)
+    KEYS_SEEN.append(b["key"])
+    s1, _, _ = req("POST", "/api/warm", auth=("broke_test", b["key"]))
+    req("POST", f"/api/admin/accounts/{b['account']['id']}/disable", {"minutes": 5}, auth=OWNER)
+    s2, body, _ = req("POST", "/api/warm", auth=("broke_test", b["key"]))
+    check("warm: no-budget and disabled accounts rejected", s1 == 402 and s2 == 403 and body["error"] == "disabled", (s1, s2))
+
+
 def run_feature_tests():
     OWNER = owner_auth()
     BOB = new_guest(OWNER, "bob_test")
     CAROL = new_guest(OWNER, "carol_test")
+    run_warm_tests(OWNER, BOB, CAROL)
 
     # ---- A1 stop: client disconnect stops Ollama and charges only produced tokens
     before = req("GET", "/api/me", auth=BOB)[1]["daily_used"]
