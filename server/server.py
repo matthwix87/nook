@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usernames  # noqa: E402
@@ -33,11 +33,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------- config
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Nook, a friendly, concise assistant running privately on your owner's own computer. "
+    "If asked your name or who you are, say you're Nook. You are not human and don't claim to be conscious. "
+    "If sincerely asked what model you run on, say you run on an open-source language model; don't name or invent a vendor.")
+
+
 def load_config():
     path = os.environ.get("GATEWAY_CONFIG", os.path.join(ROOT, "config.json"))
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     cfg.setdefault("owner_username", "owner")
+    # Newer settings, so an older config.json keeps working.
+    for key, default in (("system_prompt", DEFAULT_SYSTEM_PROMPT), ("max_instructions_chars", 2000), ("max_file_bytes", 204800),
+                         ("max_files_per_message", 4), ("max_project_bytes", 1048576)):
+        cfg.setdefault(key, default)
     # Any key can be overridden by an upper-cased environment variable.
     for key, default in list(cfg.items()):
         val = os.environ.get(key.upper())
@@ -102,7 +112,43 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS conv_acc ON conversations(account_id);
 CREATE INDEX IF NOT EXISTS msg_conv ON messages(conversation_id);
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  created REAL NOT NULL,
+  updated REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_files (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS proj_acc ON projects(account_id);
+CREATE INDEX IF NOT EXISTS pfile_proj ON project_files(project_id);
 """)
+
+
+def migrate():
+    """Add columns introduced after the first release (safe to run on every start)."""
+    added = {
+        "accounts": [("instructions", "TEXT NOT NULL DEFAULT ''")],
+        "conversations": [("pinned", "INTEGER NOT NULL DEFAULT 0"), ("project_id", "INTEGER")],
+        "messages": [("attachments", "TEXT")],  # JSON list of {name, content} on user messages
+    }
+    for table, cols in added.items():
+        have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols:
+            if name not in have:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    db.execute("CREATE INDEX IF NOT EXISTS conv_proj ON conversations(project_id)")
+
+
+migrate()
 
 
 def q(sql, args=()):
@@ -298,6 +344,51 @@ class ApiError(Exception):
         self.code, self.body = code, {"error": error, "message": message, **extra}
 
 
+# ---------------------------------------------------------------- text files
+BINARY_EXT = set("""png jpg jpeg gif webp bmp ico tif tiff heic avif svgz psd pdf zip gz tgz bz2 xz 7z rar zst
+tar jar war apk ipa exe dll so dylib bin o a obj class pyc wasm iso dmg img mp3 mp4 m4a wav ogg flac
+mov avi mkv webm doc docx xls xlsx ppt pptx odt ods odp sqlite db ttf otf woff woff2 eot""".split())
+
+
+def clean_file(f):
+    """Validate one {name, content} text file from a request; returns (name, content, size)."""
+    if not isinstance(f, dict) or not isinstance(f.get("name"), str) or not isinstance(f.get("content"), str):
+        raise ApiError(400, "bad_file", "Each file needs a name and text content")
+    name = re.sub(r'[\x00-\x1f"<>\\/]', "", f["name"]).strip()[:120] or "file.txt"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    content = f["content"]
+    try:
+        size = len(content.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ApiError(400, "not_text", f"{name} isn't valid UTF-8 text")
+    if ext in BINARY_EXT or "\x00" in content:
+        raise ApiError(400, "not_text", f"{name} isn't a text file. Only text and code files can be attached.")
+    if not content.strip():
+        raise ApiError(400, "empty_file", f"{name} is empty")
+    if size > CFG["max_file_bytes"]:
+        raise ApiError(400, "file_too_large", f"{name} is too large (max {CFG['max_file_bytes'] // 1024} KB per file)")
+    controls = sum(1 for ch in content[:20000] if ord(ch) < 32 and ch not in "\t\n\r\f")
+    if controls > len(content[:20000]) // 100:
+        raise ApiError(400, "not_text", f"{name} looks like a binary file, not text")
+    return name, content, size
+
+
+def file_block(name, content):
+    return f'<file name="{name}">\n{content}\n</file>'
+
+
+def user_prompt(content, attachments):
+    """A user message as the model sees it: the text, then each attached file as a delimited block."""
+    if not attachments:
+        return content
+    return content + "\n\n" + "\n\n".join(file_block(a["name"], a["content"]) for a in attachments)
+
+
+def est(text):
+    """Rough token estimate (~3 chars per token, on the safe side for code)."""
+    return len(text) // 3 + 4
+
+
 # ---------------------------------------------------------------- http
 class Handler(BaseHTTPRequestHandler):
     server_version = "gateway"
@@ -397,8 +488,18 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", r"/api/me", "me"),
         ("GET", r"/api/conversations", "list_convs"),
         ("GET", r"/api/conversations/(\d+)", "get_conv"),
+        ("PATCH", r"/api/conversations/(\d+)", "edit_conv"),
         ("DELETE", r"/api/conversations/(\d+)", "delete_conv"),
         ("POST", r"/api/chat", "chat"),
+        ("GET", r"/api/settings", "get_settings"),
+        ("PATCH", r"/api/settings", "edit_settings"),
+        ("GET", r"/api/projects", "list_projects"),
+        ("POST", r"/api/projects", "create_project"),
+        ("GET", r"/api/projects/(\d+)", "get_project"),
+        ("PATCH", r"/api/projects/(\d+)", "edit_project"),
+        ("DELETE", r"/api/projects/(\d+)", "delete_project"),
+        ("POST", r"/api/projects/(\d+)/files", "add_project_file"),
+        ("DELETE", r"/api/projects/(\d+)/files/(\d+)", "delete_project_file"),
         ("GET", r"/api/admin/accounts", "admin_list"),
         ("POST", r"/api/admin/accounts/search", "admin_search"),
         ("POST", r"/api/admin/accounts", "admin_create"),
@@ -459,15 +560,60 @@ class Handler(BaseHTTPRequestHandler):
 
     def list_convs(self):
         acc = self.authenticate()
-        rows = q("SELECT id, title, created, updated FROM conversations WHERE account_id=? ORDER BY updated DESC",
-                 (acc["id"],))
-        self.send_json(200, [dict(r) for r in rows])
+        term = (parse_qs(urlparse(self.path).query).get("q") or [""])[0].strip()[:200]
+        cols = "id, title, created, updated, pinned, project_id"
+        if not term:
+            rows = q(f"SELECT {cols} FROM conversations WHERE account_id=? ORDER BY pinned DESC, updated DESC",
+                     (acc["id"],))
+            return self.send_json(200, [dict(r) for r in rows])
+        like = "%" + re.sub(r"([\\%_])", r"\\\1", term) + "%"
+        rows = q(f"""SELECT {cols},
+                       (SELECT content FROM messages m WHERE m.conversation_id=c.id
+                          AND m.content LIKE ? ESCAPE '\\' ORDER BY m.id LIMIT 1) AS hit
+                     FROM conversations c WHERE account_id=? AND (title LIKE ? ESCAPE '\\' OR EXISTS (
+                       SELECT 1 FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE ? ESCAPE '\\'))
+                     ORDER BY pinned DESC, updated DESC LIMIT 100""", (like, acc["id"], like, like))
+        out = []
+        for r in rows:
+            item = dict(r)
+            hit = item.pop("hit")
+            if hit:
+                i = hit.lower().find(term.lower())
+                start = max(0, i - 40)
+                item["snippet"] = ("..." if start else "") + " ".join(hit[start:start + 120].split())
+            out.append(item)
+        self.send_json(200, out)
 
     def get_conv(self, conv_id):
         acc = self.authenticate()
         conv = self.own_conv(acc, conv_id)
-        msgs = q("SELECT role, content, created FROM messages WHERE conversation_id=? ORDER BY id", (conv_id,))
-        self.send_json(200, {**dict(conv), "messages": [dict(m) for m in msgs]})
+        msgs = []
+        for m in q("SELECT id, role, content, attachments, created FROM messages WHERE conversation_id=? ORDER BY id",
+                   (conv_id,)):
+            item = dict(m)
+            files = json.loads(item.pop("attachments") or "[]")
+            item["attachments"] = [{"name": f["name"], "size": len(f["content"].encode())} for f in files]
+            msgs.append(item)
+        self.send_json(200, {**dict(conv), "messages": msgs})
+
+    def edit_conv(self, conv_id):
+        acc = self.authenticate()
+        self.own_conv(acc, conv_id)
+        body = self.read_json()
+        if "title" in body:
+            title = " ".join(str(body["title"]).split())[:120]
+            if not title:
+                raise ApiError(400, "bad_request", "Title can't be empty")
+            q("UPDATE conversations SET title=? WHERE id=?", (title, conv_id))
+        if "pinned" in body:
+            q("UPDATE conversations SET pinned=? WHERE id=?", (1 if body["pinned"] else 0, conv_id))
+        if "project_id" in body:
+            pid = body["project_id"]
+            if pid is not None:
+                pid = self.own_project(acc, pid)["id"]
+            q("UPDATE conversations SET project_id=? WHERE id=?", (pid, conv_id))
+        conv = self.own_conv(acc, conv_id)
+        self.send_json(200, {k: conv[k] for k in ("id", "title", "created", "updated", "pinned", "project_id")})
 
     def delete_conv(self, conv_id):
         acc = self.authenticate()
@@ -475,70 +621,271 @@ class Handler(BaseHTTPRequestHandler):
         q("DELETE FROM conversations WHERE id=?", (conv_id,))
         self.send_json(200, {"ok": True})
 
+    # ---- custom instructions
+    def get_settings(self):
+        acc = self.authenticate()
+        self.send_json(200, {"instructions": acc["instructions"], "max_instructions_chars": CFG["max_instructions_chars"],
+                             "max_file_bytes": CFG["max_file_bytes"], "max_files_per_message": CFG["max_files_per_message"],
+                             "max_project_bytes": CFG["max_project_bytes"]})
+
+    def clean_instructions(self, value):
+        if not isinstance(value, str):
+            raise ApiError(400, "bad_request", "Instructions must be text")
+        value = value.strip()
+        if len(value) > CFG["max_instructions_chars"]:
+            raise ApiError(400, "too_long", f"Instructions are too long (max {CFG['max_instructions_chars']} characters)")
+        return value
+
+    def edit_settings(self):
+        acc = self.authenticate()
+        body = self.read_json()
+        if "instructions" in body:
+            q("UPDATE accounts SET instructions=? WHERE id=?", (self.clean_instructions(body["instructions"]), acc["id"]))
+        self.get_settings()
+
+    # ---- projects
+    def own_project(self, acc, project_id):
+        if not isinstance(project_id, int) or isinstance(project_id, bool):
+            raise ApiError(400, "bad_request", "project_id must be a number")
+        proj = q1("SELECT * FROM projects WHERE id=? AND account_id=?", (project_id, acc["id"]))
+        if not proj:
+            raise ApiError(404, "not_found", "Project not found")
+        return proj
+
+    def project_json(self, proj):
+        files = q("SELECT id, name, size, created FROM project_files WHERE project_id=? ORDER BY id", (proj["id"],))
+        return {**{k: proj[k] for k in ("id", "name", "instructions", "created", "updated")}, "files": [dict(f) for f in files],
+                "total_bytes": sum(f["size"] for f in files)}
+
+    def list_projects(self):
+        acc = self.authenticate()
+        rows = q("SELECT * FROM projects WHERE account_id=? ORDER BY name COLLATE NOCASE", (acc["id"],))
+        self.send_json(200, [self.project_json(p) for p in rows])
+
+    def project_name(self, value):
+        name = " ".join(str(value or "").split())[:80]
+        if not name:
+            raise ApiError(400, "bad_request", "Give the project a name")
+        return name
+
+    def create_project(self):
+        acc = self.authenticate()
+        body = self.read_json()
+        name = self.project_name(body.get("name"))
+        instructions = self.clean_instructions(body.get("instructions", ""))
+        if q1("SELECT COUNT(*) AS n FROM projects WHERE account_id=?", (acc["id"],))["n"] >= 50:
+            raise ApiError(400, "too_many", "You can have at most 50 projects")
+        now = time.time()
+        with LOCK:
+            pid = db.execute("INSERT INTO projects (account_id, name, instructions, created, updated) VALUES (?,?,?,?,?)",
+                             (acc["id"], name, instructions, now, now)).lastrowid
+        self.send_json(201, self.project_json(self.own_project(acc, pid)))
+
+    def get_project(self, project_id):
+        acc = self.authenticate()
+        self.send_json(200, self.project_json(self.own_project(acc, project_id)))
+
+    def edit_project(self, project_id):
+        acc = self.authenticate()
+        self.own_project(acc, project_id)
+        body = self.read_json()
+        if "name" in body:
+            q("UPDATE projects SET name=? WHERE id=?", (self.project_name(body["name"]), project_id))
+        if "instructions" in body:
+            q("UPDATE projects SET instructions=? WHERE id=?", (self.clean_instructions(body["instructions"]), project_id))
+        q("UPDATE projects SET updated=? WHERE id=?", (time.time(), project_id))
+        self.send_json(200, self.project_json(self.own_project(acc, project_id)))
+
+    def delete_project(self, project_id):
+        acc = self.authenticate()
+        self.own_project(acc, project_id)
+        chats = self.read_json().get("chats", "keep")
+        if chats not in ("keep", "delete"):
+            raise ApiError(400, "bad_request", "chats must be 'keep' or 'delete'")
+        with LOCK:
+            if chats == "delete":
+                db.execute("DELETE FROM conversations WHERE project_id=? AND account_id=?", (project_id, acc["id"]))
+            else:
+                db.execute("UPDATE conversations SET project_id=NULL WHERE project_id=? AND account_id=?",
+                           (project_id, acc["id"]))
+            db.execute("DELETE FROM projects WHERE id=?", (project_id,))  # files go with it (cascade)
+        self.send_json(200, {"ok": True})
+
+    def add_project_file(self, project_id):
+        acc = self.authenticate()
+        proj = self.own_project(acc, project_id)
+        name, content, size = clean_file(self.read_json())
+        used = q1("SELECT COALESCE(SUM(size), 0) AS n FROM project_files WHERE project_id=?", (project_id,))["n"]
+        if used + size > CFG["max_project_bytes"]:
+            raise ApiError(400, "project_full", f"Not enough room: projects hold up to "
+                           f"{CFG['max_project_bytes'] // 1024} KB of files ({used // 1024} KB used)")
+        q("INSERT INTO project_files (project_id, name, content, size, created) VALUES (?,?,?,?,?)",
+          (project_id, name, content, size, time.time()))
+        self.send_json(201, self.project_json(proj))
+
+    def delete_project_file(self, project_id, file_id):
+        acc = self.authenticate()
+        proj = self.own_project(acc, project_id)
+        if not q1("SELECT id FROM project_files WHERE id=? AND project_id=?", (file_id, project_id)):
+            raise ApiError(404, "not_found", "File not found")
+        q("DELETE FROM project_files WHERE id=?", (file_id,))
+        self.send_json(200, self.project_json(proj))
+
     # ---- chat
     def chat(self):
+        """New message, edit of an earlier user message (edit_message_id), or regenerate (regenerate: true)."""
         acc = self.authenticate()
         body = self.read_json()
         owner = bool(acc["is_owner"])
+        regenerate = bool(body.get("regenerate"))
+        edit_id = body.get("edit_message_id")
         text = body.get("message")
-        if not isinstance(text, str) or not text.strip():
-            raise ApiError(400, "bad_request", "Message is empty")
-        if not owner and len(text) > CFG["guest_max_message_chars"]:
-            raise ApiError(400, "too_long", f"Message too long (max {CFG['guest_max_message_chars']} characters)")
+        if not regenerate:
+            if not isinstance(text, str) or not text.strip():
+                raise ApiError(400, "bad_request", "Message is empty")
+            if not owner and len(text) > CFG["guest_max_message_chars"]:
+                raise ApiError(400, "too_long", f"Message too long (max {CFG['guest_max_message_chars']} characters)")
+        files = body.get("attachments") or []
+        if not isinstance(files, list) or len(files) > CFG["max_files_per_message"]:
+            raise ApiError(400, "too_many_files", f"Attach at most {CFG['max_files_per_message']} files per message")
+        attachments = [dict(zip(("name", "content"), clean_file(f)[:2])) for f in files]
         if not owner:
             if budget(acc)["total_left"] <= 0:
                 raise ApiError(402, "no_tokens", "You're out of tokens for today. The daily allowance resets at midnight.",
                                resets_at=next_midnight())
+
+        conv_id = body.get("conversation_id")
+        conv = self.own_conv(acc, int(conv_id)) if conv_id is not None else None
+        if (regenerate or edit_id is not None) and not conv:
+            raise ApiError(400, "bad_request", "conversation_id is required")
+        if conv:
+            project_id = conv["project_id"]
+        else:
+            project_id = body.get("project_id")
+            if project_id is not None:
+                self.own_project(acc, project_id)
+        project = q1("SELECT * FROM projects WHERE id=?", (project_id,)) if project_id else None
+
+        # The conversation as it will look after this request, oldest first.
+        rows = [dict(r) for r in q("SELECT id, role, content, attachments FROM messages WHERE conversation_id=? "
+                                   "ORDER BY id", (conv["id"],))] if conv else []
+        for r in rows:
+            r["attachments"] = json.loads(r["attachments"] or "[]")
+        if regenerate:
+            last_user = max((i for i, r in enumerate(rows) if r["role"] == "user"), default=None)
+            if last_user is None:
+                raise ApiError(400, "bad_request", "Nothing to regenerate")
+            convo = rows[:last_user + 1]
+        elif edit_id is not None:
+            idx = next((i for i, r in enumerate(rows) if r["id"] == edit_id and r["role"] == "user"), None)
+            if idx is None:
+                raise ApiError(404, "not_found", "Message not found")
+            convo = rows[:idx] + [{**rows[idx], "content": text}]
+        else:
+            convo = rows + [{"role": "user", "content": text, "attachments": attachments}]
+        messages, max_reply, notices = self.build_prompt(acc, owner, project, convo)
+
+        if not owner:
             with throttle_lock:
                 dq = guest_requests[acc["id"]]
                 if recent(dq, 60) >= CFG["guest_requests_per_minute"]:
                     raise ApiError(429, "rate_limited", "Slow down a little - too many messages this minute.")
                 dq.append(time.time())
 
-        conv_id = body.get("conversation_id")
-        if conv_id is not None:
-            self.own_conv(acc, int(conv_id))
-
         Ollama.active += 1
         try:
             if not Ollama.ensure():
                 raise ApiError(503, "offline", "The host's computer is offline right now.")
             now = time.time()
-            if conv_id is None:
-                title = " ".join(text.split())[:60]
-                with LOCK:
-                    conv_id = db.execute("INSERT INTO conversations (account_id, title, created, updated) VALUES (?,?,?,?)",
-                                         (acc["id"], title, now, now)).lastrowid
-            conv_id = int(conv_id)
-            q("INSERT INTO messages (conversation_id, role, content, created) VALUES (?,?,?,?)",
-              (conv_id, "user", text, now))
-            self.stream_reply(acc, owner, conv_id)
+            with LOCK:
+                if conv is None:
+                    title = " ".join(text.split())
+                    title = title if len(title) <= 50 else title[:50].rsplit(" ", 1)[0] + "..."
+                    conv_id = db.execute("INSERT INTO conversations (account_id, title, created, updated, project_id) "
+                                         "VALUES (?,?,?,?,?)", (acc["id"], title, now, now, project_id)).lastrowid
+                conv_id = int(conv_id)
+                if regenerate:
+                    user_id = convo[-1]["id"]
+                    db.execute("DELETE FROM messages WHERE conversation_id=? AND id>?", (conv_id, user_id))
+                elif edit_id is not None:
+                    user_id = edit_id
+                    db.execute("DELETE FROM messages WHERE conversation_id=? AND id>?", (conv_id, user_id))
+                    db.execute("UPDATE messages SET content=? WHERE id=?", (text, user_id))
+                else:
+                    user_id = db.execute("INSERT INTO messages (conversation_id, role, content, attachments, created) "
+                                         "VALUES (?,?,?,?,?)", (conv_id, "user", text,
+                                                                json.dumps(attachments) if attachments else None,
+                                                                now)).lastrowid
+            self.stream_reply(acc, conv_id, user_id, messages, max_reply, notices)
         finally:
             Ollama.active -= 1
             Ollama.last_activity = time.time()
 
-    def build_history(self, conv_id, owner):
+    def build_prompt(self, acc, owner, project, convo):
+        """Fit system text, project files and history into the account's context window.
+
+        Priority: system prompt + custom instructions + project instructions + the newest user message (must fit,
+        otherwise a clear error), then project files, then older history newest-first.
+        """
         ctx = CFG["owner_context_tokens"] if owner else CFG["guest_context_tokens"]
         reply = CFG["owner_max_reply_tokens"] if owner else CFG["guest_max_reply_tokens"]
         room = ctx - reply
-        rows = q("SELECT role, content FROM messages WHERE conversation_id=? ORDER BY id DESC", (conv_id,))
+        system = [CFG["system_prompt"]] if CFG["system_prompt"] else []  # assistant identity, always first
+        if acc["instructions"]:
+            system.append("The user's custom instructions:\n" + acc["instructions"])
+        if project:
+            system.append(f'This chat is part of the project "{project["name"]}".')
+            if project["instructions"]:
+                system.append("Project instructions:\n" + project["instructions"])
+        last = convo[-1]
+        last_text = user_prompt(last["content"], last["attachments"])
+        fixed = est("\n\n".join(system)) + est(last_text)
+        if fixed > room:
+            what = "This message and its attachments are" if last["attachments"] else "This message is"
+            raise ApiError(413, "doesnt_fit", f"{what} too big for the context window: about {fixed:,} tokens, "
+                           f"but this account can use about {room:,}. Remove a file or shorten the text.",
+                           needed=fixed, limit=room)
+        room -= fixed
+        history = [{"role": r["role"], "content": user_prompt(r["content"], r["attachments"])} for r in convo[:-1]]
+        notices = []
+        if project:
+            # Files may use the room left, but keep up to a quarter of it for recent history.
+            hist_cost = sum(est(m["content"]) for m in history)
+            file_room = room - min(room // 4, hist_cost)
+            left_out = []
+            files = q("SELECT name, content FROM project_files WHERE project_id=? ORDER BY id", (project["id"],))
+            blocks = []
+            for f in files:
+                block = file_block(f["name"], f["content"])
+                if est(block) <= file_room:
+                    file_room -= est(block)
+                    room -= est(block)
+                    blocks.append(block)
+                else:
+                    left_out.append(f["name"])
+            if blocks:
+                system.append("Project files:\n\n" + "\n\n".join(blocks))
+            if left_out:
+                notices.append("Some project files didn't fit in the context window and were left out: "
+                               + ", ".join(left_out))
         picked = []
-        for r in rows:  # newest first; rough estimate of ~3.5 chars per token
-            cost = len(r["content"]) * 2 // 7 + 4
-            if picked and cost > room:
+        for m in reversed(history):
+            cost = est(m["content"])
+            if cost > room:
                 break
             room -= cost
-            picked.append({"role": r["role"], "content": r["content"]})
-        return picked[::-1], reply
+            picked.append(m)
+        messages = ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + picked[::-1] + \
+            [{"role": "user", "content": last_text}]
+        return messages, reply, notices
 
-    def stream_reply(self, acc, owner, conv_id):
-        messages, max_reply = self.build_history(conv_id, owner)
+    def stream_reply(self, acc, conv_id, user_id, messages, max_reply, notices):
         req = urllib.request.Request(
             CFG["ollama_url"] + "/api/chat",
             data=json.dumps({
                 "model": CFG["model"], "messages": messages, "stream": True, "think": False,
                 # Same num_ctx for everyone so Ollama never reloads the model; guests get
-                # a smaller window because build_history trims their history.
+                # a smaller window because build_prompt trims their history.
                 "options": {"num_ctx": CFG["owner_context_tokens"], "num_predict": max_reply},
             }).encode(),
             headers={"Content-Type": "application/json"},
@@ -560,10 +907,13 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
             self.wfile.flush()
 
-        reply, usage, client_gone = [], None, False
-        try:
-            event({"type": "meta", "conversation_id": conv_id})
-            with resp:
+        reply, usage, client_gone, produced = [], None, False, 0
+        # Closing resp (the with-block) drops the upstream connection, which makes Ollama stop generating.
+        with resp:
+            try:
+                event({"type": "meta", "conversation_id": conv_id, "user_message_id": user_id})
+                for n in notices:
+                    event({"type": "notice", "message": n})
                 for line in resp:
                     if not line.strip():
                         continue
@@ -574,30 +924,33 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     piece = chunk.get("message", {}).get("content", "")
                     if piece:
+                        produced += 1  # Ollama streams one token per chunk
                         reply.append(piece)
                         event({"type": "delta", "text": piece})
                     if chunk.get("done"):
                         usage = (chunk.get("prompt_eval_count", 0), chunk.get("eval_count", 0))
                         break
-        except (BrokenPipeError, ConnectionResetError):
-            client_gone = True
-        except Exception as e:
-            log("stream error:", type(e).__name__, e)
+            except (BrokenPipeError, ConnectionResetError):
+                client_gone = True
+            except Exception as e:
+                log("stream error:", type(e).__name__, e)
 
-        if usage is None:  # aborted: charge a rough estimate instead
-            prompt_chars = sum(len(m["content"]) for m in messages)
-            usage = (prompt_chars * 2 // 7, len("".join(reply)) * 2 // 7)
+        if usage is None:  # stopped or failed: prompt estimate + only the tokens actually produced
+            usage = (sum(est(m["content"]) for m in messages), produced)
         full = "".join(reply)
         now = time.time()
+        asst_id = None
         if full:
-            q("INSERT INTO messages (conversation_id, role, content, created) VALUES (?,?,?,?)",
-              (conv_id, "assistant", full, now))
+            with LOCK:
+                asst_id = db.execute("INSERT INTO messages (conversation_id, role, content, created) VALUES (?,?,?,?)",
+                                     (conv_id, "assistant", full, now)).lastrowid
         q("UPDATE conversations SET updated=? WHERE id=?", (now, conv_id))
         acc = charge(acc["id"], usage[0] + usage[1])
         if not client_gone and acc:
             try:
-                event({"type": "done", "usage": {"prompt": usage[0], "completion": usage[1],
-                                                 "total": usage[0] + usage[1]}, "budget": budget(acc)})
+                event({"type": "done", "assistant_message_id": asst_id,
+                       "usage": {"prompt": usage[0], "completion": usage[1], "total": usage[0] + usage[1]},
+                       "budget": budget(acc)})
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -665,6 +1018,8 @@ class Handler(BaseHTTPRequestHandler):
         if acc["is_owner"]:
             raise ApiError(400, "owner", "The owner account can't be deleted")
         q("DELETE FROM accounts WHERE id=?", (acc_id,))
+        with throttle_lock:
+            guest_requests.pop(acc_id, None)  # ids can be reused by the next account
         log("account deleted:", acc["username"])
         self.send_json(200, {"ok": True})
 

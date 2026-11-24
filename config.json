@@ -4,6 +4,7 @@
   "data_dir": "data",
   "ollama_url": "http://127.0.0.1:11434",
   "model": "qwen3.8:27b",
+  "system_prompt": "You are Nook, a friendly, concise assistant running privately on your owner's own computer. If asked your name or who you are, say you're Nook. You are not human and don't claim to be conscious. If sincerely asked what model you run on, say you run on an open-source language model; don't name or invent a vendor.",
 
   "auto_manage_ollama": true,
   "ollama_on_cmd": "~/.local/bin/ollama-on",
@@ -21,5 +22,10 @@
 
   "login_max_failures": 10,
   "login_lockout_minutes": 15,
-  "max_body_bytes": 262144
+  "max_body_bytes": 2097152,
+
+  "max_instructions_chars": 2000,
+  "max_file_bytes": 204800,
+  "max_files_per_message": 4,
+  "max_project_bytes": 1048576
 }
