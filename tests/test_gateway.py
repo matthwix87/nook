@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""End-to-end test against a live proxy and the real Ollama.
+"""End-to-end tests against a live proxy and a fake Ollama (tests/fake_ollama.py).
 
-Starts its own proxy on a test port with a throwaway data dir, so it never
-touches data/. Needs Ollama installed; with AUTO_MANAGE it starts Ollama via
-ollama-on and checks that the idle timer stops it again.
-Run on the host:  python3 tests/test_gateway.py
+Starts its own proxy on a test port with a throwaway data dir, so it never touches data/
+or the real Ollama. The proxy auto-starts the fake Ollama through OLLAMA_ON_CMD and stops
+it again after the idle timeout through OLLAMA_OFF_CMD.
+Run:  python3 tests/test_gateway.py
 """
+import http.client
 import json
 import os
+import re
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,11 +22,17 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8797
+FAKE_PORT = 11597
+FAKE = f"http://127.0.0.1:{FAKE_PORT}"
 BASE = f"http://127.0.0.1:{PORT}"
 DATA = tempfile.mkdtemp(prefix="gateway-test-")
+FAKE_SCRIPT = os.path.join(ROOT, "tests", "fake_ollama.py")
 ENV = {**os.environ, "DATA_DIR": DATA, "PORT": str(PORT), "AUTO_MANAGE_OLLAMA": "1",
-       "OLLAMA_IDLE_MINUTES": "0.5", "GUEST_REQUESTS_PER_MINUTE": "3",
-       "ALLOWED_ORIGINS": "https://example.github.io"}
+       "OLLAMA_URL": FAKE, "MODEL": "qwen3.8:27b",
+       "OLLAMA_ON_CMD": f"sh -c 'exec {sys.executable} {FAKE_SCRIPT} {FAKE_PORT} >/dev/null 2>&1 &'",
+       "OLLAMA_OFF_CMD": f"pkill -f 'fake_ollama.py {FAKE_PORT}'",
+       "OLLAMA_IDLE_MINUTES": "0.25", "GUEST_REQUESTS_PER_MINUTE": "3",
+       "MAX_PROJECT_BYTES": "300000", "ALLOWED_ORIGINS": "https://example.github.io"}
 
 results = []
 
@@ -54,9 +64,10 @@ def req(method, path, body=None, auth=None, headers=None, raw=False, timeout=300
         return resp.status, text, resp.headers
 
 
-def chat(auth, message, conv=None):
+def chat(auth, message, conv=None, **extra):
     """Returns (status, events) - events parsed from the SSE stream."""
-    resp = req("POST", "/api/chat", {"message": message, "conversation_id": conv}, auth=auth, raw=True, timeout=600)
+    resp = req("POST", "/api/chat", {"message": message, "conversation_id": conv, **extra}, auth=auth, raw=True,
+               timeout=600)
     if resp.status != 200:
         return resp.status, json.loads(resp.read())
     events = []
@@ -70,9 +81,26 @@ def chat(auth, message, conv=None):
     return 200, events
 
 
+def reply_of(events):
+    return "".join(e["text"] for e in events if e.get("type") == "delta")
+
+
+def done_of(events):
+    return next((e for e in events if e.get("type") == "done"), None)
+
+
+def fake(path):
+    with urllib.request.urlopen(FAKE + path, timeout=5) as r:
+        return json.load(r)
+
+
+def est(text):
+    return len(text) // 3 + 4
+
+
 def ollama_up():
     try:
-        urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2)
+        urllib.request.urlopen(FAKE + "/api/tags", timeout=2)
         return True
     except Exception:
         return False
@@ -93,19 +121,19 @@ def start_server(extra_env=None):
 
 
 def main():
-    if ollama_up():
-        print("note: Ollama already running; stopping it first so the down/up path is tested")
-        subprocess.run([os.path.expanduser("~/.local/bin/ollama-off")], capture_output=True)
-        time.sleep(2)
-
+    subprocess.run(["pkill", "-f", f"fake_ollama.py {FAKE_PORT}"], capture_output=True)
+    time.sleep(0.5)
     srv = start_server()
     try:
         run_tests()
+        run_feature_tests()
     finally:
         srv.terminate()
         srv.wait()
 
     # /status with auto-manage off and Ollama down -> not available
+    subprocess.run(["pkill", "-f", f"fake_ollama.py {FAKE_PORT}"], capture_output=True)
+    time.sleep(0.5)
     srv = start_server({"AUTO_MANAGE_OLLAMA": "0"})
     try:
         s, st, _ = req("GET", "/status")
@@ -117,6 +145,8 @@ def main():
 
     log = open(os.path.join(DATA, "server.log")).read()
     check("no keys appear in the server log", all(k not in log for k in KEYS_SEEN), "key found in log")
+    run_migration_tests()
+    subprocess.run(["pkill", "-f", f"fake_ollama.py {FAKE_PORT}"], capture_output=True)
     shutil.rmtree(DATA, ignore_errors=True)
 
     passed = sum(ok for _, ok in results)
@@ -301,7 +331,7 @@ def run_tests():
     check("CORS: localhost allowed", s == 200 and h["Access-Control-Allow-Origin"] == "http://localhost:8788")
 
     # ---- request size limit
-    r = urllib.request.Request(BASE + "/api/chat", data=b"x" * 300000, method="POST",
+    r = urllib.request.Request(BASE + "/api/chat", data=b"x" * 2200000, method="POST",
                                headers={"Authorization": f"Bearer alice_test:{body['key']}"})
     try:
         code = urllib.request.urlopen(r, timeout=10).status
@@ -327,7 +357,7 @@ def run_tests():
     # ---- status while up, then idle auto-stop
     s, st, _ = req("GET", "/status")
     check("status when Ollama up", st["ollama"] is True and st["model_available"] is True, st)
-    print("     waiting for idle auto-stop (idle timeout 30s)...", flush=True)
+    print("     waiting for idle auto-stop (idle timeout 15s)...", flush=True)
     stopped = False
     for _ in range(30):
         time.sleep(3)
@@ -337,6 +367,327 @@ def run_tests():
     check("Ollama stopped automatically after idle timeout", stopped)
     s, st, _ = req("GET", "/status")
     check("status after auto-stop reports Ollama down", st["ollama"] is False, st)
+
+
+def owner_auth():
+    return ("owner", open(os.path.join(DATA, "owner_key.txt")).read().split("key: ")[1].strip())
+
+
+def new_guest(owner, name, allowance=500000):
+    s, body, _ = req("POST", "/api/admin/accounts", {"username": name, "daily_allowance": allowance}, auth=owner)
+    KEYS_SEEN.append(body["key"])
+    return (name, body["key"])
+
+
+def chat_and_stop(auth, message, after=5):
+    """Start a streamed chat, read `after` deltas, then drop the connection (what the Stop button does)."""
+    body = json.dumps({"message": message}).encode()
+    sock = socket.create_connection(("127.0.0.1", PORT), timeout=30)
+    sock.sendall(f"POST /api/chat HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {auth[0]}:{auth[1]}\r\n"
+                 f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+    buf, deltas, conv = b"", 0, None
+    while deltas < after:
+        data = sock.recv(4096)
+        if not data:
+            break
+        buf += data
+        for m in re.finditer(rb"data: (\{.*?\})\n\n", buf):
+            ev = json.loads(m.group(1))
+            conv = ev.get("conversation_id", conv)
+        deltas = buf.count(b'"type": "delta"')
+    if not buf.startswith(b"HTTP/1.0 200") and not buf.startswith(b"HTTP/1.1 200"):
+        raise SystemExit("chat_and_stop: " + buf[:200].decode(errors="replace"))
+    sock.shutdown(socket.SHUT_RDWR)
+    sock.close()
+    return conv
+
+
+def run_feature_tests():
+    OWNER = owner_auth()
+    BOB = new_guest(OWNER, "bob_test")
+    CAROL = new_guest(OWNER, "carol_test")
+
+    # ---- A1 stop: client disconnect stops Ollama and charges only produced tokens
+    before = req("GET", "/api/me", auth=BOB)[1]["daily_used"]
+    conv = chat_and_stop(BOB, "SLOW please count")
+    time.sleep(1.5)
+    stats = fake("/_stats")
+    sent_messages = fake("/_last")["messages"]
+    s, c, _ = req("GET", f"/api/conversations/{conv}", auth=BOB)
+    saved = c["messages"][-1]["content"] if s == 200 else ""
+    produced = len(saved.split())
+    charged = req("GET", "/api/me", auth=BOB)[1]["daily_used"] - before
+    check("stop: upstream Ollama request closed early", stats["cancelled"] >= 1 and stats["sent"] < 100, stats)
+    check(f"stop: partial reply saved ({produced} tokens)", c["messages"][-1]["role"] == "assistant" and 0 < produced < 100,
+          c["messages"])
+    check("stop: charged prompt estimate + produced tokens only",
+          charged == sum(est(m["content"]) for m in sent_messages) + produced, (charged, produced))
+
+    # ---- A2 edit + regenerate
+    s, ev = chat(OWNER, "first question")
+    conv = ev[0]["conversation_id"]
+    u1 = ev[0]["user_message_id"]
+    chat(OWNER, "second question", conv)
+    s, c, _ = req("GET", f"/api/conversations/{conv}", auth=OWNER)
+    check("messages carry ids", len(c["messages"]) == 4 and c["messages"][0]["id"] == u1)
+    s, ev = chat(OWNER, "first question, edited", conv, edit_message_id=u1)
+    s, c, _ = req("GET", f"/api/conversations/{conv}", auth=OWNER)
+    check("edit: conversation truncated after edited message and re-answered",
+          [m["role"] for m in c["messages"]] == ["user", "assistant"] and c["messages"][0]["id"] == u1
+          and c["messages"][0]["content"] == "first question, edited", c["messages"])
+    check("edit: model saw only the edited history",
+          [m["content"] for m in fake("/_last")["messages"] if m["role"] != "system"] == ["first question, edited"])
+    old_asst = c["messages"][1]["created"]
+    s, ev = chat(OWNER, None, conv, regenerate=True)
+    s, c, _ = req("GET", f"/api/conversations/{conv}", auth=OWNER)
+    check("regenerate: last reply replaced, user message kept",
+          s == 200 and len(c["messages"]) == 2 and c["messages"][1]["created"] != old_asst
+          and done_of(ev)["assistant_message_id"] == c["messages"][1]["id"], c["messages"])
+    s1, _ = chat(CAROL, None, conv, regenerate=True)
+    s2, _ = chat(CAROL, "hijack", conv, edit_message_id=u1)
+    check("edit/regenerate of another account's chat rejected", s1 == 404 and s2 == 404, (s1, s2))
+
+    # ---- A3 search, rename, pin, auto-title
+    s, ev = chat(OWNER, "Tell me about the zebra123 migration patterns of the savanna and many other things here")
+    zconv = ev[0]["conversation_id"]
+    s, convs, _ = req("GET", "/api/conversations", auth=OWNER)
+    title = next(x["title"] for x in convs if x["id"] == zconv)
+    check("auto-title from first message, truncated", title.startswith("Tell me about the zebra123") and
+          title.endswith("...") and len(title) <= 53, title)
+    s, found, _ = req("GET", "/api/conversations?q=ZEBRA123", auth=OWNER)
+    check("search finds message text (case-insensitive) with snippet",
+          [x["id"] for x in found] == [zconv] and "zebra123" in found[0].get("snippet", ""), found)
+    s, r, _ = req("PATCH", f"/api/conversations/{conv}", {"title": "Giraffe notes"}, auth=OWNER)
+    s, found, _ = req("GET", "/api/conversations?q=giraffe", auth=OWNER)
+    check("rename + search by title", r["title"] == "Giraffe notes" and [x["id"] for x in found] == [conv])
+    s, found, _ = req("GET", "/api/conversations?q=%25", auth=OWNER)
+    check("search treats % literally", s == 200 and found == [], found)
+    req("PATCH", f"/api/conversations/{conv}", {"pinned": True}, auth=OWNER)
+    s, convs, _ = req("GET", "/api/conversations", auth=OWNER)
+    check("pinned chat floats to the top", convs[0]["id"] == conv and convs[0]["pinned"] == 1)
+    s, found, _ = req("GET", "/api/conversations?q=zebra123", auth=CAROL)
+    s2, _, _ = req("PATCH", f"/api/conversations/{conv}", {"title": "pwned"}, auth=CAROL)
+    s3, _, _ = req("DELETE", f"/api/conversations/{conv}", auth=CAROL)
+    check("other account can't search, rename or delete my chats", found == [] and s2 == 404 and s3 == 404)
+
+    # ---- A4 custom instructions
+    s, st, _ = req("PATCH", "/api/settings", {"instructions": "Always answer in French."}, auth=OWNER)
+    check("custom instructions saved", s == 200 and st["instructions"] == "Always answer in French.")
+    chat(OWNER, "hello")
+    msgs = fake("/_last")["messages"]
+    check("custom instructions injected as system message",
+          msgs[0]["role"] == "system" and "Always answer in French." in msgs[0]["content"], msgs[0])
+    s, body, _ = req("PATCH", "/api/settings", {"instructions": "x" * 2001}, auth=OWNER)
+    check("custom instructions capped at 2000 chars", s == 400 and body["error"] == "too_long")
+    s, st, _ = req("GET", "/api/settings", auth=CAROL)
+    check("instructions are per account", st["instructions"] == "")
+    chat(CAROL, "hello")
+    guest_msgs = fake("/_last")["messages"]
+    check("Nook system prompt is the first system message for owner and guest",
+          all(m[0]["role"] == "system" and m[0]["content"].startswith("You are Nook") for m in (msgs, guest_msgs))
+          and [x["role"] for x in guest_msgs].count("system") == 1
+          and msgs[0]["content"].index("You are Nook") < msgs[0]["content"].index("Always answer in French."),
+          (msgs[0], guest_msgs[0]))
+
+    # ---- A5 file attachments
+    good = {"name": "hello.py", "content": "print('hi')\n"}
+    bad_cases = {
+        "binary extension rejected": ([{"name": "cat.png", "content": "abc"}], "not_text"),
+        "NUL byte content rejected": ([{"name": "x.txt", "content": "ab\x00cd"}], "not_text"),
+        "control-char content rejected": ([{"name": "x.dat", "content": "\x01\x02\x03\x04" * 50}], "not_text"),
+        "oversized file rejected (>200KB)": ([{"name": "big.txt", "content": "a" * 204801}], "file_too_large"),
+        "more than 4 files rejected": ([good] * 5, "too_many_files"),
+        "empty file rejected": ([{"name": "e.txt", "content": "  "}], "empty_file"),
+    }
+    for name, (files, code) in bad_cases.items():
+        s, body = chat(OWNER, "see file", attachments=files)
+        check("attach: " + name, s == 400 and body["error"] == code, body)
+    s, ev = chat(BOB, "what does this do?", attachments=[good])
+    last = fake("/_last")["messages"][-1]["content"]
+    check("attach: file sent as delimited block", s == 200 and '<file name="hello.py">\nprint(\'hi\')\n\n</file>' in last
+          and last.startswith("what does this do?"), last)
+    s, c, _ = req("GET", f"/api/conversations/{ev[0]['conversation_id']}", auth=BOB)
+    check("attach: stored and listed as chips (name + size, no content)",
+          c["messages"][0]["attachments"] == [{"name": "hello.py", "size": 12}] and c["messages"][0]["content"] ==
+          "what does this do?", c["messages"][0])
+    convs_before = len(req("GET", "/api/conversations", auth=BOB)[1])
+    used_before = req("GET", "/api/me", auth=BOB)[1]["daily_used"]
+    s, body = chat(BOB, "summarize", attachments=[{"name": "log.txt", "content": "line of text\n" * 6000}])
+    check("attach: too big for guest context -> clear doesnt_fit error",
+          s == 413 and body["error"] == "doesnt_fit" and "Remove a file" in body["message"], body)
+    check("attach: rejected message not saved, nothing charged",
+          len(req("GET", "/api/conversations", auth=BOB)[1]) == convs_before
+          and req("GET", "/api/me", auth=BOB)[1]["daily_used"] == used_before)
+    s, body = chat(OWNER, "summarize", attachments=[{"name": f"f{i}.txt", "content": "z" * 200000} for i in range(4)])
+    check("attach: 4x200KB doesn't fit the owner window either", s == 413 and body["error"] == "doesnt_fit", body)
+    # instructions count against context: fits without them, not with them
+    big = [{"name": "a.txt", "content": "a" * 20500}]
+    s1, _ = chat(CAROL, "x", attachments=big)
+    req("PATCH", "/api/settings", {"instructions": "b" * 2000}, auth=CAROL)
+    s2, body = chat(CAROL, "x", attachments=big)
+    check("custom instructions are counted against the context", s1 == 200 and s2 == 413, (s1, s2, body))
+    req("PATCH", "/api/settings", {"instructions": ""}, auth=CAROL)
+
+    # ---- B projects
+    s, p, _ = req("POST", "/api/projects", {"name": "Proj A", "instructions": "Use British spelling."}, auth=OWNER)
+    pid = p["id"]
+    check("create project", s == 201 and p["name"] == "Proj A" and p["files"] == [])
+    s, p, _ = req("POST", f"/api/projects/{pid}/files", {"name": "notes.md", "content": "PROJECT_FACT_42"}, auth=OWNER)
+    check("add project file", s == 201 and p["files"][0]["name"] == "notes.md" and p["total_bytes"] == 15)
+    s, body, _ = req("POST", f"/api/projects/{pid}/files", {"name": "x.zip", "content": "PK"}, auth=OWNER)
+    check("project file: binary rejected", s == 400 and body["error"] == "not_text")
+    req("POST", f"/api/projects/{pid}/files", {"name": "big1.txt", "content": "q" * 150000}, auth=OWNER)
+    s, body, _ = req("POST", f"/api/projects/{pid}/files", {"name": "big2.txt", "content": "q" * 150000}, auth=OWNER)
+    check("project total size cap enforced", s == 400 and body["error"] == "project_full", body)
+    s, ev = chat(OWNER, "what is the fact?", project_id=pid)
+    pconv = ev[0]["conversation_id"]
+    sysmsg = fake("/_last")["messages"][0]["content"]
+    check("project instructions + files included after custom instructions",
+          "Use British spelling." in sysmsg and "PROJECT_FACT_42" in sysmsg and "big1.txt" in sysmsg
+          and sysmsg.index("Always answer in French.") < sysmsg.index("Use British spelling.")
+          < sysmsg.index("PROJECT_FACT_42"), sysmsg[:300])
+    s, convs, _ = req("GET", "/api/conversations", auth=OWNER)
+    check("chat belongs to the project", next(x for x in convs if x["id"] == pconv)["project_id"] == pid)
+    chat(OWNER, "follow up", pconv)
+    check("follow-up in project chat still gets project context", "PROJECT_FACT_42" in fake("/_last")["messages"][0]["content"])
+    s, p, _ = req("PATCH", f"/api/projects/{pid}", {"name": "Proj B", "instructions": "Be brief."}, auth=OWNER)
+    s2, p2, _ = req("GET", f"/api/projects/{pid}", auth=OWNER)
+    check("edit project", p2["name"] == "Proj B" and p2["instructions"] == "Be brief.")
+    s, p, _ = req("DELETE", f"/api/projects/{pid}/files/{p2['files'][1]['id']}", auth=OWNER)
+    check("delete project file", s == 200 and [f["name"] for f in p["files"]] == ["notes.md"])
+
+    # guests: project files that don't fit are left out with a notice
+    s, gp, _ = req("POST", "/api/projects", {"name": "Guest proj"}, auth=BOB)
+    req("POST", f"/api/projects/{gp['id']}/files", {"name": "small.txt", "content": "SMALL_FILE"}, auth=BOB)
+    req("POST", f"/api/projects/{gp['id']}/files", {"name": "huge.txt", "content": "h" * 100000}, auth=BOB)
+    s, ev = chat(BOB, "hi", project_id=gp["id"])
+    notes = [e["message"] for e in ev if e.get("type") == "notice"]
+    sysmsg = fake("/_last")["messages"][0]["content"]
+    check("guest: oversized project file left out with a notice, small file kept",
+          s == 200 and notes and "huge.txt" in notes[0] and "SMALL_FILE" in sysmsg and "hhhh" not in sysmsg, notes)
+
+    # isolation
+    codes = [req("GET", f"/api/projects/{pid}", auth=BOB)[0],
+             req("PATCH", f"/api/projects/{pid}", {"name": "pwn"}, auth=BOB)[0],
+             req("DELETE", f"/api/projects/{pid}", auth=BOB)[0],
+             req("POST", f"/api/projects/{pid}/files", {"name": "a.txt", "content": "a"}, auth=BOB)[0],
+             req("DELETE", f"/api/projects/{pid}/files/{p['files'][0]['id']}", auth=BOB)[0],
+             chat(BOB, "hi", project_id=pid)[0],
+             req("PATCH", f"/api/conversations/{ev[0]['conversation_id']}", {"project_id": pid}, auth=BOB)[0],
+             req("DELETE", f"/api/projects/{gp['id']}/files/{p['files'][0]['id']}", auth=BOB)[0]]
+    s, plist, _ = req("GET", "/api/projects", auth=BOB)
+    check("another account's projects/files are invisible and untouchable", codes == [404] * 8
+          and [x["name"] for x in plist] == ["Guest proj"], codes)
+
+    # move chat between projects, delete project keep/delete chats
+    s, c, _ = req("PATCH", f"/api/conversations/{zconv}", {"project_id": pid}, auth=OWNER)
+    check("move chat into project", c["project_id"] == pid)
+    s, _, _ = req("DELETE", f"/api/projects/{pid}", {"chats": "keep"}, auth=OWNER)
+    s2, convs, _ = req("GET", "/api/conversations", auth=OWNER)
+    kept = [x for x in convs if x["id"] in (zconv, pconv)]
+    check("delete project, keep chats (unassigned)", s == 200 and len(kept) == 2 and all(x["project_id"] is None for x in kept)
+          and req("GET", f"/api/projects/{pid}", auth=OWNER)[0] == 404)
+    s, p, _ = req("POST", "/api/projects", {"name": "Temp"}, auth=OWNER)
+    req("PATCH", f"/api/conversations/{zconv}", {"project_id": p["id"]}, auth=OWNER)
+    s, _, _ = req("DELETE", f"/api/projects/{p['id']}", {"chats": "delete"}, auth=OWNER)
+    check("delete project with its chats", s == 200 and req("GET", f"/api/conversations/{zconv}", auth=OWNER)[0] == 404)
+    s, body, _ = req("POST", "/api/projects", {"name": "  "}, auth=OWNER)
+    check("project needs a name", s == 400)
+
+
+OLD_SCHEMA = """
+CREATE TABLE accounts (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  key_hash TEXT NOT NULL UNIQUE, is_owner INTEGER NOT NULL DEFAULT 0, daily_allowance INTEGER NOT NULL DEFAULT 0,
+  daily_used INTEGER NOT NULL DEFAULT 0, tokens_today INTEGER NOT NULL DEFAULT 0, daily_day TEXT NOT NULL DEFAULT '',
+  topup INTEGER NOT NULL DEFAULT 0, disabled_until REAL NOT NULL DEFAULT 0, created REAL NOT NULL,
+  last_active REAL NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, total_requests INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE conversations (id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  title TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversations(id)
+  ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created REAL NOT NULL);
+"""
+
+
+def migration_case(label, data_dir, make_old):
+    """Open an old-schema DB with the new server; old accounts/chats must keep working."""
+    import hashlib
+    path = os.path.join(data_dir, "gateway.db")
+    con = sqlite3.connect(path)
+    if make_old:
+        con.executescript(OLD_SCHEMA)
+    key = "migration-test-key-" + os.urandom(8).hex()
+    KEYS_SEEN.append(key)
+    now = time.time()
+    con.execute("INSERT INTO accounts (username, key_hash, daily_allowance, daily_used, topup, created, daily_day) "
+                "VALUES ('legacy_user', ?, 9000, 100, 50, ?, date('now','localtime'))",
+                (hashlib.sha256(key.encode()).hexdigest(), now))
+    if make_old:  # an owner so the server doesn't create one
+        con.execute("INSERT INTO accounts (username, key_hash, is_owner, created) VALUES ('owner', 'x', 1, ?)", (now,))
+    acc = con.execute("SELECT id FROM accounts WHERE username='legacy_user'").fetchone()[0]
+    cid = con.execute("INSERT INTO conversations (account_id, title, created, updated) VALUES (?, 'Old chat', ?, ?)",
+                      (acc, now, now)).lastrowid
+    con.execute("INSERT INTO messages (conversation_id, role, content, created) VALUES (?, 'user', 'old question', ?)", (cid, now))
+    con.execute("INSERT INTO messages (conversation_id, role, content, created) VALUES (?, 'assistant', 'old answer', ?)", (cid, now))
+    con.commit()
+    snap = lambda c: (c.execute("SELECT id, username, key_hash, is_owner, daily_allowance, topup FROM accounts ORDER BY id").fetchall(),
+                      c.execute("SELECT COUNT(*) FROM conversations").fetchone(), c.execute("SELECT COUNT(*) FROM messages").fetchone())
+    before = snap(con)
+    con.close()
+
+    port = 8798
+    log = open(os.path.join(DATA, "migration.log"), "a")
+    p = subprocess.Popen([sys.executable, os.path.join(ROOT, "server", "server.py")],
+                         env={**ENV, "DATA_DIR": data_dir, "PORT": str(port)}, stdout=log, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL)
+    global BASE
+    saved_base, BASE = BASE, f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(40):
+            try:
+                urllib.request.urlopen(BASE + "/status", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.25)
+        auth = ("legacy_user", key)
+        s, me, _ = req("GET", "/api/me", auth=auth)
+        check(f"migration ({label}): old account logs in, budget intact",
+              s == 200 and me["daily_allowance"] == 9000 and me["daily_used"] == 100 and me["topup"] == 50, me)
+        s, convs, _ = req("GET", "/api/conversations", auth=auth)
+        s2, c, _ = req("GET", f"/api/conversations/{cid}", auth=auth)
+        check(f"migration ({label}): old chat listed and opens",
+              [x["title"] for x in convs] == ["Old chat"] and convs[0]["pinned"] == 0 and convs[0]["project_id"] is None
+              and [m["content"] for m in c["messages"]] == ["old question", "old answer"]
+              and c["messages"][0]["attachments"] == [], (convs, c))
+        s, ev = chat(auth, "continue", cid)
+        check(f"migration ({label}): can continue old chat", s == 200 and done_of(ev), ev)
+        s, _, _ = req("PATCH", "/api/settings", {"instructions": "hi"}, auth=auth)
+        s2, _, _ = req("POST", "/api/projects", {"name": "P"}, auth=auth)
+        check(f"migration ({label}): new features work on migrated DB", s == 200 and s2 == 201)
+    finally:
+        BASE = saved_base
+        p.terminate()
+        p.wait()
+    con = sqlite3.connect(path)
+    after = snap(con)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(conversations)")}
+    con.close()
+    check(f"migration ({label}): existing accounts/keys unchanged, rows kept",
+          after[0] == before[0] and after[1][0] == before[1][0] and after[2][0] == before[2][0] + 2
+          and {"pinned", "project_id"} <= cols)
+
+
+def run_migration_tests():
+    d = tempfile.mkdtemp(prefix="gateway-mig-", dir=DATA)
+    migration_case("synthetic old schema", d, True)
+    real = os.path.join(ROOT, "data", "gateway.db")
+    if os.path.exists(real):
+        d = tempfile.mkdtemp(prefix="gateway-mig-real-", dir=DATA)
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(real + suffix):
+                shutil.copy2(real + suffix, os.path.join(d, "gateway.db" + suffix))
+        migration_case("copy of data/gateway.db", d, False)
+    else:
+        print("     (no data/gateway.db - skipped migrating a copy of the real DB)")
 
 
 if __name__ == "__main__":
