@@ -1,0 +1,9 @@
+bin/
+obj/
+tools/
+dist/
+build/
+screenshots/*.tmp
+*.user
+.vs/
+TestResults/

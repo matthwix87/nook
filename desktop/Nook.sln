@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nook.Core", "Nook.Core\Nook.Core.csproj", "{5C2477B3-51E0-49F2-A77E-5F24B62293F1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nook.Tests", "Nook.Tests\Nook.Tests.csproj", "{BFD25696-510E-49DD-9468-ADD823BD7AB6}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5C2477B3-51E0-49F2-A77E-5F24B62293F1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5C2477B3-51E0-49F2-A77E-5F24B62293F1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5C2477B3-51E0-49F2-A77E-5F24B62293F1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5C2477B3-51E0-49F2-A77E-5F24B62293F1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BFD25696-510E-49DD-9468-ADD823BD7AB6}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
