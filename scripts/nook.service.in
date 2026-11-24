@@ -1,0 +1,14 @@
+# Template for ~/.config/systemd/user/nook.service (written by scripts/install-autostart.sh).
+[Unit]
+Description=Nook chat gateway (proxy + Cloudflare quick tunnel)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/scripts/autostart.sh
+ExecStop=@DIR@/scripts/stop.sh
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=default.target
