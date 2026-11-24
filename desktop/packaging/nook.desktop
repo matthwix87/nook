@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nook
+Comment=Chat with Nook and let it help with code in a local folder
+Exec=Nook %U
+Icon=nook
+Terminal=false
+Categories=Network;Chat;Development;
+StartupWMClass=Nook
