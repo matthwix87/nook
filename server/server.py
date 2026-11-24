@@ -177,6 +177,10 @@ REPLY_STYLES = {
 }
 
 
+def valid_style(value):
+    return isinstance(value, str) and value in REPLY_STYLES
+
+
 def q(sql, args=()):
     with LOCK:
         return db.execute(sql, args).fetchall()
@@ -389,18 +393,21 @@ class Ollama:
         last_off = 0
         while True:
             time.sleep(2)
-            if flag("nook_off"):
-                if time.time() - last_off > 60 and cls.status()[0]:
-                    last_off = time.time()
-                    cls.stop_now()
-                continue
-            idle = time.time() - cls.last_activity
-            if (cls.started_by_us and cls.active == 0 and CFG["auto_manage_ollama"]
-                    and idle > CFG["ollama_idle_minutes"] * 60):
-                with cls.lock:
-                    log("Ollama idle, stopping it")
-                    cls.run(CFG["ollama_off_cmd"])
-                    cls.started_by_us = False
+            try:  # never let this thread die silently (e.g. "database is locked")
+                if flag("nook_off"):
+                    if time.time() - last_off > 60 and cls.status()[0]:
+                        last_off = time.time()
+                        cls.stop_now()
+                    continue
+                idle = time.time() - cls.last_activity
+                if (cls.started_by_us and cls.active == 0 and CFG["auto_manage_ollama"]
+                        and idle > CFG["ollama_idle_minutes"] * 60):
+                    with cls.lock:
+                        log("Ollama idle, stopping it")
+                        cls.run(CFG["ollama_off_cmd"])
+                        cls.started_by_us = False
+            except Exception as e:
+                log("idle watcher error:", type(e).__name__, e)
 
 
 # ---------------------------------------------------------------- throttles
@@ -712,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
         if "pinned" in body:
             q("UPDATE conversations SET pinned=? WHERE id=?", (1 if body["pinned"] else 0, conv_id))
         if "reply_style" in body:  # null = follow the account's default
-            if body["reply_style"] is not None and body["reply_style"] not in REPLY_STYLES:
+            if body["reply_style"] is not None and not valid_style(body["reply_style"]):
                 raise ApiError(400, "bad_request", "Unknown reply style")
             q("UPDATE conversations SET reply_style=? WHERE id=?", (body["reply_style"], conv_id))
         if "project_id" in body:
@@ -752,6 +759,9 @@ class Handler(BaseHTTPRequestHandler):
         if str(self.read_json().get("confirm", "")).lower() != acc["username"].lower():
             raise ApiError(400, "confirm", "Type your username to confirm")
         q("DELETE FROM accounts WHERE id=?", (acc["id"],))  # chats, projects, files and usage cascade
+        with throttle_lock:
+            guest_requests.pop(acc["id"], None)  # ids can be reused by the next account
+            warm_requests.pop(acc["id"], None)
         log("account deleted by its user:", acc["username"])
         self.send_json(200, {"ok": True})
 
@@ -814,11 +824,13 @@ class Handler(BaseHTTPRequestHandler):
     def edit_settings(self):
         acc = self.authenticate()
         body = self.read_json()
-        if "instructions" in body:
-            q("UPDATE accounts SET instructions=? WHERE id=?", (self.clean_instructions(body["instructions"]), acc["id"]))
+        # Validate everything first so a request is all-or-nothing.
+        instructions = self.clean_instructions(body["instructions"]) if "instructions" in body else None
+        if "reply_style" in body and not valid_style(body["reply_style"]):
+            raise ApiError(400, "bad_request", "Unknown reply style")
+        if instructions is not None:
+            q("UPDATE accounts SET instructions=? WHERE id=?", (instructions, acc["id"]))
         if "reply_style" in body:
-            if body["reply_style"] not in REPLY_STYLES:
-                raise ApiError(400, "bad_request", "Unknown reply style")
             q("UPDATE accounts SET reply_style=? WHERE id=?", (body["reply_style"], acc["id"]))
         self.get_settings()
 
@@ -939,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
         if (regenerate or edit_id is not None) and not conv:
             raise ApiError(400, "bad_request", "conversation_id is required")
         style = body.get("reply_style")
-        if style is not None and style not in REPLY_STYLES:
+        if style is not None and not valid_style(style):
             raise ApiError(400, "bad_request", "Unknown reply style")
         if conv:
             project_id = conv["project_id"]

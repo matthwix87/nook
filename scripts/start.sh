@@ -11,12 +11,16 @@ PORT="${PORT:-$(python3 -c 'import json; print(json.load(open("config.json"))["p
 MODE="${1:-all}"
 
 # A pid file counts only if that process is still alive AND is the program we started
-# (after a crash the pid may be gone or reused by something else).
+# (after a crash the pid may be gone or reused by something else). PATTERN is an extended regex
+# matched against the whole command line, so `tail -f data/cloudflared.log` or
+# `python3 server/server.py --nook-off` don't count.
+SERVER_CMD='^(\S*/)?python3 server/server\.py $'
+TUNNEL_CMD='^(\S*/)?cloudflared tunnel --no-autoupdate --url '
 alive() {  # alive NAME PATTERN
   local f="data/$1.pid" pid
   [ -f "$f" ] || return 1
   pid="$(cat "$f")"
-  if [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -q -- "$2"; then
+  if [ -n "$pid" ] && tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -qE -- "$2"; then
     return 0
   fi
   rm -f "$f"  # stale
@@ -31,7 +35,7 @@ fi
 mkdir -p data && chmod 700 data
 
 if [ "$MODE" != "--tunnel-only" ]; then
-  if alive server "server/server.py"; then
+  if alive server "$SERVER_CMD"; then
     echo "already running (pid $(cat data/server.pid)). Use scripts/stop.sh first." >&2
     exit 3
   fi
@@ -47,12 +51,12 @@ if [ "$MODE" != "--tunnel-only" ]; then
   curl -fs "http://127.0.0.1:$PORT/status" >/dev/null || { echo "error: proxy did not start, see data/server.log" >&2; exit 1; }
   echo "Proxy running on http://127.0.0.1:$PORT (log: data/server.log)"
   [ "$MODE" = "--local" ] && exit 0
-elif ! alive server "server/server.py"; then
+elif ! alive server "$SERVER_CMD"; then
   echo "error: --tunnel-only needs the proxy running" >&2
   exit 1
 fi
 
-if alive cloudflared "cloudflared"; then
+if alive cloudflared "$TUNNEL_CMD"; then
   echo "tunnel already running (pid $(cat data/cloudflared.pid))." >&2
   exit 3
 fi

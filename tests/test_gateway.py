@@ -783,6 +783,15 @@ def run_account_tests(OWNER, BOB, CAROL):
     s1, _, _ = req("PATCH", "/api/settings", {"reply_style": "pirate"}, auth=OWNER)
     s2, _ = chat(OWNER, "x", reply_style="pirate")
     check("unknown reply style rejected", s1 == 400 and s2 == 400)
+    codes = [req("PATCH", "/api/settings", {"reply_style": ["x"]}, auth=OWNER)[0],
+             req("PATCH", f"/api/conversations/{cid}", {"reply_style": {"a": 1}}, auth=OWNER)[0],
+             chat(OWNER, "x", reply_style=["x"])[0]]
+    req("PATCH", "/api/settings", {"instructions": "KEEP_ME"}, auth=OWNER)
+    s3, _, _ = req("PATCH", "/api/settings", {"instructions": "CHANGED", "reply_style": "pirate"}, auth=OWNER)
+    kept = req("GET", "/api/settings", auth=OWNER)[1]["instructions"]
+    req("PATCH", "/api/settings", {"instructions": ""}, auth=OWNER)
+    check("non-text reply style -> 400 (not 500); settings update is all-or-nothing",
+          codes == [400, 400, 400] and s3 == 400 and kept == "KEEP_ME", (codes, s3, kept))
     req("PATCH", "/api/settings", {"reply_style": ""}, auth=OWNER)
 
     # ---- usage
