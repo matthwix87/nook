@@ -5,7 +5,7 @@ import struct
 import zlib
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "icons")
-BLUE, WHITE = (0x5B, 0x7C, 0xF0), (255, 255, 255)
+BLUE, WHITE = (0x2C, 0x6B, 0x5A), (255, 255, 255)
 
 
 def in_rrect(x, y, x0, y0, x1, y1, r):

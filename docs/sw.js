@@ -1,6 +1,6 @@
 // Service worker: caches the app shell so the PWA opens instantly.
 // backend.json and all backend (cross-origin) requests always go to the network.
-const CACHE = "chat-shell-v1";
+const CACHE = "nook-shell-v2";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 

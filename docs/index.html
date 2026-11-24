@@ -2,14 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f1115">
-  <meta name="color-scheme" content="dark">
-  <title>Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f2f4f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151a18" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <title>Nook</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="style.css">
+  <script>
+    // Apply the saved theme before first paint (no flash).
+    try { var t = JSON.parse(localStorage.getItem("theme")); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
 </head>
 <body>
   <!-- Loading -->
@@ -20,21 +25,21 @@
   <!-- Offline / not working -->
   <section id="view-offline" class="center-view" hidden>
     <div class="card narrow">
-      <div class="big-icon">&#x1F4A4;</div>
+      <div class="status-mark off" aria-hidden="true"></div>
       <h1>Currently not working</h1>
       <p class="muted" id="offline-detail">The host's computer is offline. Try again later.</p>
-      <button class="btn primary" id="offline-retry">Retry</button>
+      <button class="btn primary" id="offline-retry">Try again</button>
     </div>
   </section>
 
   <!-- Disabled -->
   <section id="view-disabled" class="center-view" hidden>
     <div class="card narrow">
-      <div class="big-icon">&#x23F8;&#xFE0F;</div>
+      <div class="status-mark paused" aria-hidden="true"></div>
       <h1>Account paused</h1>
       <p class="muted">Your account is temporarily disabled.</p>
       <p id="disabled-until"></p>
-      <div class="row gap">
+      <div class="row gap center">
         <button class="btn primary" id="disabled-retry">Check again</button>
         <button class="btn" data-action="logout">Log out</button>
       </div>
@@ -43,9 +48,10 @@
 
   <!-- Login -->
   <section id="view-login" class="center-view" hidden>
-    <form class="card narrow" id="login-form" autocomplete="on">
-      <div class="logo"><img src="icons/icon.svg" alt="" width="56" height="56"></div>
-      <h1>Sign in</h1>
+    <form class="card narrow login" id="login-form" autocomplete="on">
+      <img class="logo" src="icons/icon.svg" alt="" width="52" height="52">
+      <h1>Welcome to Nook</h1>
+      <p class="muted">Sign in with the username and key you were given.</p>
       <label>Username
         <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
       </label>
@@ -59,44 +65,89 @@
 
   <!-- Chat -->
   <section id="view-chat" class="app" hidden>
-    <aside id="drawer" class="drawer">
+    <aside id="drawer" class="drawer" aria-label="Chats">
       <div class="drawer-head">
-        <button class="btn primary wide" id="new-chat">+ New chat</button>
+        <div class="brand"><img src="icons/icon.svg" alt="" width="26" height="26"><span>Nook</span></div>
+        <button class="icon-btn" id="theme-btn" aria-label="Theme" title="Theme"></button>
+        <button class="icon-btn desktop-only" id="collapse-btn" aria-label="Hide sidebar" title="Hide sidebar" data-icon="sidebar"></button>
       </div>
-      <nav id="conv-list" class="conv-list"></nav>
+      <div class="drawer-actions">
+        <button class="btn primary wide" id="new-chat"><span data-icon="plus"></span>New chat</button>
+        <div class="search-wrap">
+          <span data-icon="search"></span>
+          <input id="chat-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false" aria-label="Search chats">
+        </div>
+      </div>
+      <div class="drawer-scroll">
+        <div class="section-head">
+          <span>Projects</span>
+          <button class="icon-btn tiny" id="new-project" aria-label="New project" title="New project" data-icon="plus"></button>
+        </div>
+        <nav id="project-list" class="project-list"></nav>
+        <div class="section-head"><span id="chats-head">Chats</span></div>
+        <nav id="conv-list" class="conv-list"></nav>
+      </div>
       <div class="drawer-foot">
         <div class="meter" id="meter">
           <div class="meter-label" id="meter-label"></div>
           <div class="meter-bar"><div id="meter-fill"></div></div>
           <div class="meter-sub muted" id="meter-sub"></div>
         </div>
-        <button class="btn wide" id="open-admin" hidden>Admin</button>
-        <button class="btn wide ghost" data-action="logout">Log out <span id="whoami" class="muted"></span></button>
+        <div class="foot-row">
+          <button class="btn ghost" id="open-settings"><span data-icon="settings"></span>Settings</button>
+          <button class="btn ghost" id="open-admin" hidden><span data-icon="users"></span>Admin</button>
+        </div>
+        <button class="btn ghost wide logout" data-action="logout"><span data-icon="logout"></span>Log out <span id="whoami" class="muted"></span></button>
       </div>
     </aside>
     <div id="scrim" class="scrim" hidden></div>
     <main class="chat-main">
       <header class="topbar">
-        <button class="icon-btn" id="menu-btn" aria-label="Conversations">&#9776;</button>
-        <div class="topbar-title" id="chat-title">New chat</div>
-        <button class="icon-btn" id="delete-chat" aria-label="Delete chat" title="Delete chat" hidden>&#128465;</button>
+        <button class="icon-btn" id="menu-btn" aria-label="Show chats" title="Show chats" data-icon="menu"></button>
+        <div class="topbar-title">
+          <span id="chat-project" class="project-tag" hidden></span>
+          <span id="chat-title">New chat</span>
+        </div>
+        <button class="icon-btn" id="rename-chat" aria-label="Rename chat" title="Rename chat" data-icon="edit" hidden></button>
+        <button class="icon-btn" id="delete-chat" aria-label="Delete chat" title="Delete chat" data-icon="trash" hidden></button>
       </header>
-      <div id="messages" class="messages">
-        <div class="empty-hint" id="empty-hint">Ask me anything.</div>
+      <div id="messages" class="messages"></div>
+      <div class="composer-wrap">
+        <form id="composer" class="composer">
+          <div id="attach-chips" class="chips" hidden></div>
+          <textarea id="input" rows="1" placeholder="Message Nook" enterkeyhint="send" aria-label="Message"></textarea>
+          <div class="composer-row">
+            <button class="icon-btn" id="attach-btn" type="button" aria-label="Attach text files" title="Attach text or code files" data-icon="clip"></button>
+            <input id="file-input" type="file" multiple hidden>
+            <span class="composer-hint muted" id="composer-hint"></span>
+            <button class="send-btn" id="send" type="submit" aria-label="Send" title="Send" data-icon="send"></button>
+            <button class="send-btn stop" id="stop" type="button" aria-label="Stop" title="Stop" data-icon="stop" hidden></button>
+          </div>
+        </form>
       </div>
-      <form id="composer" class="composer">
-        <textarea id="input" rows="1" placeholder="Message" enterkeyhint="send"></textarea>
-        <button class="send-btn" id="send" type="submit" aria-label="Send">&#10148;</button>
-      </form>
     </main>
+    <aside id="panel" class="panel" hidden aria-label="Code">
+      <header class="panel-head">
+        <div class="panel-title" id="panel-title">snippet.txt</div>
+        <div class="tabs" id="panel-tabs" role="tablist">
+          <button class="tab active" data-tab="code" role="tab">Code</button>
+          <button class="tab" data-tab="preview" role="tab">Preview</button>
+        </div>
+        <button class="icon-btn" id="panel-copy" aria-label="Copy code" title="Copy" data-icon="copy"></button>
+        <button class="icon-btn" id="panel-download" aria-label="Download" title="Download" data-icon="download"></button>
+        <button class="icon-btn" id="panel-close" aria-label="Close panel" title="Close (Esc)" data-icon="close"></button>
+      </header>
+      <pre class="panel-code" id="panel-code"><code></code></pre>
+      <iframe id="panel-preview" class="panel-preview" sandbox="allow-scripts" title="HTML preview" hidden></iframe>
+    </aside>
   </section>
 
   <!-- Admin -->
   <section id="view-admin" class="admin" hidden>
     <header class="topbar">
-      <button class="icon-btn" id="admin-back" aria-label="Back">&#8592;</button>
-      <div class="topbar-title">Accounts</div>
-      <span></span>
+      <button class="icon-btn" id="admin-back" aria-label="Back" title="Back to chat" data-icon="back"></button>
+      <div class="topbar-title"><span>Accounts</span></div>
+      <span class="icon-spacer"></span>
     </header>
     <div class="admin-body">
       <form class="card" id="create-form">
@@ -107,7 +158,7 @@
           <label>Top-up tokens <input name="topup" type="number" min="0" step="1000" value="0"></label>
         </div>
         <p class="error" id="create-error" hidden></p>
-        <button class="btn primary" type="submit">Create</button>
+        <button class="btn primary" type="submit">Create account</button>
       </form>
       <div class="card keybox" id="keybox" hidden>
         <h2 id="keybox-title">New key</h2>
@@ -123,7 +174,87 @@
     </div>
   </section>
 
-  <div id="toast" class="toast" hidden></div>
+  <!-- Settings dialog -->
+  <dialog id="settings-dialog" class="dialog">
+    <form method="dialog" id="settings-form">
+      <h2>Settings</h2>
+      <label>Custom instructions
+        <span class="field-help">Nook reads these before every chat. For example how you'd like answers written, or things to keep in mind about you.</span>
+        <textarea name="instructions" rows="7" maxlength="2000"></textarea>
+        <span class="counter" data-counter-for="instructions"></span>
+      </label>
+      <fieldset class="theme-pick">
+        <legend>Theme</legend>
+        <label><input type="radio" name="theme" value="system"> System</label>
+        <label><input type="radio" name="theme" value="light"> Light</label>
+        <label><input type="radio" name="theme" value="dark"> Dark</label>
+      </fieldset>
+      <p class="error" id="settings-error" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="save" id="settings-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Project dialog -->
+  <dialog id="project-dialog" class="dialog wide">
+    <form method="dialog" id="project-form">
+      <h2 id="project-dialog-title">New project</h2>
+      <label>Name <input name="name" maxlength="80" required></label>
+      <label>Instructions
+        <span class="field-help">Included in every chat in this project, after your custom instructions.</span>
+        <textarea name="instructions" rows="5" maxlength="2000"></textarea>
+        <span class="counter" data-counter-for="instructions"></span>
+      </label>
+      <div id="project-files-section">
+        <div class="files-head">
+          <span>Files <span class="muted" id="project-files-total"></span></span>
+          <button class="btn small" type="button" id="project-add-file"><span data-icon="clip"></span>Add files</button>
+          <input type="file" id="project-file-input" multiple hidden>
+        </div>
+        <ul class="file-list" id="project-files"></ul>
+        <p class="field-help">Text and code files only. Files that don't fit in a chat's context window are left out, and Nook tells you which.</p>
+      </div>
+      <p class="error" id="project-error" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn danger ghost" type="button" id="project-delete">Delete project</button>
+        <span class="grow"></span>
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Delete project dialog -->
+  <dialog id="delete-project-dialog" class="dialog">
+    <form method="dialog">
+      <h2>Delete this project?</h2>
+      <p class="muted">Its instructions and files are deleted. What should happen to its chats?</p>
+      <fieldset class="choice">
+        <label><input type="radio" name="chats" value="keep" checked> Keep the chats (move them out of the project)</label>
+        <label><input type="radio" name="chats" value="delete"> Delete the chats too</label>
+      </fieldset>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="btn primary danger-fill" value="delete">Delete project</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Rename dialog -->
+  <dialog id="rename-dialog" class="dialog">
+    <form method="dialog">
+      <h2>Rename chat</h2>
+      <label>Title <input name="title" maxlength="120" required></label>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="save">Rename</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden role="status"></div>
   <script src="app.js"></script>
 </body>
 </html>
