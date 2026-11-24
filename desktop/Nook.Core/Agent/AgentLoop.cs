@@ -290,7 +290,7 @@ public static class Prompts
         - Look before you change anything: use list_dir and search to find files, and read_file before you edit a file.
         - All paths are relative to the workspace root. You cannot access anything outside the workspace.
         - To change part of a file, use edit_file. Copy old_text exactly from read_file output (same spaces and indentation) and include enough lines that it appears only once. Use write_file for new files or complete rewrites.
-        - run_command runs a {platform.ShellName} command in the workspace root and returns its output. Use it for builds, tests, git and similar. It has a time limit, so never start servers or anything that waits for input. Don't run destructive commands unless the user asked.
+        - run_command runs a {platform.ShellName} command in the workspace root and returns its output. Use it for builds, tests, git and similar. It has a time limit, so never start servers or anything that waits for input. Don't run destructive commands unless the user asked. {platform.ShellHint}
         - The user approves every file change and command. If a result says the user rejected it, don't repeat it: change your approach or ask.
         - Call one tool at a time and wait for the result. Never invent file contents or tool results.
         - If a tool returns an error, read it, fix the arguments and try again, or explain the problem.

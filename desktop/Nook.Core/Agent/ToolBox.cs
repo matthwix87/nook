@@ -299,7 +299,9 @@ public sealed class ToolBox
         var full = Workspace.Resolve(path);
         if (Directory.Exists(full)) throw new ToolException($"{path} is a folder.");
         var isNew = !File.Exists(full);
-        var before = isNew ? "" : File.ReadAllText(ExistingFile(call, path));
+        var (before, bom) = isNew ? ("", false) : ReadText(ExistingFile(call, path));
+        // Keep an existing file's CRLF line endings (Windows) when the model sends plain \n.
+        if (before.Contains("\r\n") && !content.Contains("\r\n")) content = content.Replace("\n", "\r\n");
         var rel = Workspace.Relative(full);
         var diff = Diff.Compute(before, content);
         var d = await Approve(new ApprovalRequest(ApprovalKind.WriteFile, rel, Workspace.Root, null, diff, isNew), ct);
@@ -311,7 +313,7 @@ public sealed class ToolBox
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         // Re-resolve right before writing so a link created in the meantime can't redirect the write.
         full = Workspace.Resolve(path);
-        await File.WriteAllTextAsync(full, content, CancellationToken.None);
+        await WriteText(full, content, bom);
         var (add, rem) = Diff.Count(diff);
         Session.Log(ActivityKind.Change, $"{(isNew ? "Created" : "Wrote")} {rel} (+{add} -{rem})");
         return new ToolResult($"{(isNew ? "Created" : "Wrote")} {rel} ({Diff.Lines(content).Length} lines).");
@@ -324,7 +326,7 @@ public sealed class ToolBox
         var newText = Required(call, "new_text");
         var full = ExistingFile(call, path);
         var rel = Workspace.Relative(full);
-        var before = File.ReadAllText(full);
+        var (before, bom) = ReadText(full);
         var after = ApplyEdit(before, oldText, newText, rel);
         var diff = Diff.Compute(before, after);
         var d = await Approve(new ApprovalRequest(ApprovalKind.EditFile, rel, Workspace.Root, null, diff, false), ct);
@@ -333,12 +335,23 @@ public sealed class ToolBox
             Session.Log(ActivityKind.Rejected, $"Rejected edit to {rel}");
             return Rejected($"the edit to {rel}", d);
         }
-        if (File.ReadAllText(full) != before) throw new ToolException($"{rel} changed while waiting for approval. Read it again.");
-        await File.WriteAllTextAsync(Workspace.Resolve(path), after, CancellationToken.None);
+        if (ReadText(full).Text != before) throw new ToolException($"{rel} changed while waiting for approval. Read it again.");
+        await WriteText(Workspace.Resolve(path), after, bom);
         var (add, rem) = Diff.Count(diff);
         Session.Log(ActivityKind.Change, $"Edited {rel} (+{add} -{rem})");
         return new ToolResult($"Edited {rel}: replaced {Diff.Lines(oldText).Length} line(s) with {Diff.Lines(newText).Length} line(s).");
     }
+
+    /// <summary>UTF-8 text plus whether the file starts with a BOM (common on Windows), so writes can keep it.</summary>
+    public static (string Text, bool Bom) ReadText(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var bom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        return (new UTF8Encoding(false).GetString(bytes, bom ? 3 : 0, bytes.Length - (bom ? 3 : 0)), bom);
+    }
+
+    public static Task WriteText(string path, string text, bool bom) =>
+        File.WriteAllTextAsync(path, text, new UTF8Encoding(bom), CancellationToken.None);
 
     /// <summary>Search-and-replace of exactly one occurrence. Tolerates \n vs \r\n differences.</summary>
     public static string ApplyEdit(string text, string oldText, string newText, string name = "the file")
