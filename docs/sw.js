@@ -1,7 +1,7 @@
 // Service worker: caches the app shell so the PWA opens instantly.
 // backend.json and all backend (cross-origin) requests always go to the network.
-const CACHE = "nook-shell-v4";
-const SHELL = ["./", "index.html", "style.css?v=4", "app.js?v=4", "manifest.webmanifest",
+const CACHE = "nook-shell-v5";
+const SHELL = ["./", "index.html", "style.css?v=5", "app.js?v=5", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {

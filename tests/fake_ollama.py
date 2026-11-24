@@ -7,15 +7,17 @@ Usage: python3 tests/fake_ollama.py PORT
 - If the last user message contains "SLOW", streams 300 tokens 30 ms apart (for stop tests).
 - If it asks for "last number", replies "10" (history test).
 - An empty messages list is a load request (warm-up); its options are recorded in /_stats "loads".
+- GET /api/ps lists the model once it has been used. FAKE_START_DELAY (s) delays startup.
 - GET /_last returns the last /api/chat request body; GET /_stats returns {"cancelled": n, "sent": n}.
 """
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = "qwen3.8:27b"
-STATE = {"last": None, "cancelled": 0, "sent": 0, "loads": []}
+STATE = {"last": None, "cancelled": 0, "sent": 0, "loads": [], "loaded": False}
 
 
 class H(BaseHTTPRequestHandler):
@@ -33,6 +35,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/tags":
             return self.send({"models": [{"name": MODEL}]})
+        if self.path == "/api/ps":
+            return self.send({"models": [{"name": MODEL}] if STATE["loaded"] else []})
         if self.path == "/_last":
             return self.send(STATE["last"])
         if self.path == "/_stats":
@@ -41,6 +45,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        STATE["loaded"] = True
         if not body["messages"]:  # model load request (warm-up)
             STATE["loads"].append(body.get("options"))
             return self.send({"model": MODEL, "done": True, "done_reason": "load"})
@@ -77,6 +82,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    time.sleep(float(os.environ.get("FAKE_START_DELAY", "0")))  # simulate a slow Ollama start
     srv = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
     srv.daemon_threads = True
     srv.serve_forever()

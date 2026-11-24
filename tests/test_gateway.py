@@ -32,7 +32,7 @@ ENV = {**os.environ, "DATA_DIR": DATA, "PORT": str(PORT), "AUTO_MANAGE_OLLAMA": 
        "OLLAMA_ON_CMD": f"sh -c 'exec {sys.executable} {FAKE_SCRIPT} {FAKE_PORT} >/dev/null 2>&1 &'",
        "OLLAMA_OFF_CMD": f"pkill -f 'fake_ollama.py {FAKE_PORT}'",
        "OLLAMA_IDLE_MINUTES": "0.25", "GUEST_REQUESTS_PER_MINUTE": "3",
-       "MAX_PROJECT_BYTES": "300000", "ALLOWED_ORIGINS": "https://example.github.io"}
+       "MAX_PROJECT_BYTES": "300000", "FAKE_START_DELAY": "1.5", "ALLOWED_ORIGINS": "https://example.github.io"}
 
 results = []
 
@@ -83,6 +83,10 @@ def chat(auth, message, conv=None, **extra):
 
 def reply_of(events):
     return "".join(e["text"] for e in events if e.get("type") == "delta")
+
+
+def meta(events):
+    return next(e for e in events if e.get("type") == "meta")
 
 
 def done_of(events):
@@ -139,6 +143,9 @@ def main():
         s, st, _ = req("GET", "/status")
         check("status (auto-manage off, Ollama down) reports unavailable",
               s == 200 and st["ollama"] is False and st["available"] is False, st)
+        s, body = chat(owner_auth(), "hello")
+        check("chat with auto-manage off and Ollama down -> 503 offline (no stream)",
+              s == 503 and body["error"] == "offline", body)
     finally:
         srv.terminate()
         srv.wait()
@@ -223,7 +230,7 @@ def run_tests():
           s == 200 and len(deltas) >= 3 and done, f"{s} {events if s != 200 else reply}")
     print("     reply:", reply[:80].replace("\n", " "))
     used = done["usage"]["total"] if done else 0
-    conv_id = events[0]["conversation_id"] if s == 200 else None
+    conv_id = meta(events)["conversation_id"] if s == 200 else None
     s, me, _ = req("GET", "/api/me", auth=ALICE)
     check(f"tokens charged ({used} tokens, prompt+completion)",
           used > 0 and me["daily_used"] == used and me["budget"]["daily_left"] == 5000 - used, me)
@@ -244,7 +251,7 @@ def run_tests():
     s, events = chat(OWNER, "Say hello in one word.")
     done = next((e for e in events if e.get("type") == "done"), None) if s == 200 else None
     check("owner chat works, budget unlimited", s == 200 and done and done["budget"]["unlimited"])
-    owner_conv = events[0]["conversation_id"] if s == 200 else 0
+    owner_conv = meta(events)["conversation_id"] if s == 200 else 0
     s, _, _ = req("GET", f"/api/conversations/{owner_conv}", auth=ALICE)
     check("guest cannot open someone else's conversation", s == 404)
 
@@ -410,6 +417,11 @@ def wait_for(cond, seconds):
     return False
 
 
+def kill_fake():
+    subprocess.run(["pkill", "-f", f"fake_ollama.py {FAKE_PORT}"], capture_output=True)
+    wait_for(lambda: not ollama_up(), 5)
+
+
 def run_warm_tests(OWNER, BOB, CAROL):
     check("warm: precondition - Ollama is down (idle-stopped)", not ollama_up())
     s, body, _ = req("POST", "/api/warm")
@@ -432,6 +444,25 @@ def run_warm_tests(OWNER, BOB, CAROL):
     loads = fake("/_stats")["loads"]
     check("warm: load uses the same num_ctx as chats",
           loads and all(o == {"num_ctx": fake("/_last")["options"]["num_ctx"]} for o in loads), loads)
+    # status events: "starting" while Ollama starts / loads, then "ready" before the first token
+    kill_fake()
+    s, ev = chat(OWNER, "status please")
+    types = [e["type"] + (":" + e["state"] if e["type"] == "status" else "") for e in ev]
+    first_delta = types.index("delta") if "delta" in types else 99
+    check("status: Ollama down -> starting first, ready before first token",
+          s == 200 and types[0] == "status:starting" and "status:ready" in types[:first_delta] and done_of(ev), types)
+    s, ev = chat(OWNER, "status again")
+    types = [e["type"] + (":" + e["state"] if e["type"] == "status" else "") for e in ev]
+    check("status: model already loaded -> no starting, just ready", "status:starting" not in types
+          and types.index("status:ready") < types.index("delta"), types)
+    kill_fake()
+    req("POST", "/api/warm", auth=OWNER)
+    time.sleep(0.3)
+    s, ev = chat(OWNER, "sent while warming up")
+    n = subprocess.run(["pgrep", "-fc", f"fake_ollama.py {FAKE_PORT}"], capture_output=True, text=True).stdout.strip()
+    check("status: chat during a warm-up start says starting, waits for it, one Ollama start",
+          s == 200 and ev[0].get("state") == "starting" and done_of(ev) and n == "1", (ev[:2], n))
+
     s, b, _ = req("POST", "/api/admin/accounts", {"username": "broke_test", "daily_allowance": 0}, auth=OWNER)
     KEYS_SEEN.append(b["key"])
     s1, _, _ = req("POST", "/api/warm", auth=("broke_test", b["key"]))
@@ -464,8 +495,8 @@ def run_feature_tests():
 
     # ---- A2 edit + regenerate
     s, ev = chat(OWNER, "first question")
-    conv = ev[0]["conversation_id"]
-    u1 = ev[0]["user_message_id"]
+    conv = meta(ev)["conversation_id"]
+    u1 = meta(ev)["user_message_id"]
     chat(OWNER, "second question", conv)
     s, c, _ = req("GET", f"/api/conversations/{conv}", auth=OWNER)
     check("messages carry ids", len(c["messages"]) == 4 and c["messages"][0]["id"] == u1)
@@ -488,7 +519,7 @@ def run_feature_tests():
 
     # ---- A3 search, rename, pin, auto-title
     s, ev = chat(OWNER, "Tell me about the zebra123 migration patterns of the savanna and many other things here")
-    zconv = ev[0]["conversation_id"]
+    zconv = meta(ev)["conversation_id"]
     s, convs, _ = req("GET", "/api/conversations", auth=OWNER)
     title = next(x["title"] for x in convs if x["id"] == zconv)
     check("auto-title from first message, truncated", title.startswith("Tell me about the zebra123") and
@@ -579,7 +610,7 @@ def run_feature_tests():
     s, body, _ = req("POST", f"/api/projects/{pid}/files", {"name": "big2.txt", "content": "q" * 150000}, auth=OWNER)
     check("project total size cap enforced", s == 400 and body["error"] == "project_full", body)
     s, ev = chat(OWNER, "what is the fact?", project_id=pid)
-    pconv = ev[0]["conversation_id"]
+    pconv = meta(ev)["conversation_id"]
     sysmsg = fake("/_last")["messages"][0]["content"]
     check("project instructions + files included after custom instructions",
           "Use British spelling." in sysmsg and "PROJECT_FACT_42" in sysmsg and "big1.txt" in sysmsg

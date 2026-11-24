@@ -223,6 +223,14 @@ code { font-family: var(--mono); font-size: .86em; }
 .codeblock-head .btn .ico { width: 14px; height: 14px; }
 .codeblock pre { margin: 0; padding: .8rem 1rem; overflow-x: auto; font-size: .84rem; line-height: 1.5; }
 .cursor::after { content: ""; display: inline-block; width: .55em; height: .55em; margin-left: .2em; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; vertical-align: middle; }
+.status-line { display: inline-flex; align-items: center; gap: .55rem; color: var(--muted); font-size: .92rem; }
+.status-dot { width: .55em; height: .55em; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.status-line.waking span:last-child {
+  background: linear-gradient(90deg, var(--muted) 30%, var(--accent) 50%, var(--muted) 70%) 0 0 / 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.8s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+.status-hint { font-size: .82rem; color: var(--muted); margin-top: .35rem; }
 @keyframes pulse { 50% { opacity: .25; transform: scale(.8); } }
 
 /* empty state */

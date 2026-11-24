@@ -273,6 +273,15 @@ class Ollama:
             return False, False
 
     @staticmethod
+    def model_loaded():
+        try:
+            with urllib.request.urlopen(CFG["ollama_url"] + "/api/ps", timeout=2) as r:
+                names = {m.get("name") for m in json.load(r).get("models", [])}
+            return CFG["model"] in names or CFG["model"] + ":latest" in names
+        except Exception:
+            return False
+
+    @staticmethod
     def run(cmd):
         args = shlex.split(cmd)
         args[0] = os.path.expanduser(args[0])
@@ -842,8 +851,16 @@ class Handler(BaseHTTPRequestHandler):
 
         Ollama.active += 1
         try:
-            if not Ollama.ensure():
+            up = Ollama.status()[0]
+            if not up and not CFG["auto_manage_ollama"]:
                 raise ApiError(503, "offline", "The host's computer is offline right now.")
+            # Open the stream now so the page can say "waking up" while Ollama starts / loads the model.
+            starting = Ollama.warming or not up or not Ollama.model_loaded()
+            self.start_stream()
+            if starting:
+                self.event({"type": "status", "state": "starting"})
+            if not Ollama.ensure():  # waits on the same lock as a warm-up that is already starting Ollama
+                return self.event({"type": "error", "error": "offline", "message": "The host's computer is offline right now."})
             now = time.time()
             with LOCK:
                 if conv is None:
@@ -927,6 +944,18 @@ class Handler(BaseHTTPRequestHandler):
             [{"role": "user", "content": last_text}]
         return messages, reply, notices
 
+    def start_stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.cors_headers()
+        self.end_headers()
+
+    def event(self, obj):
+        self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
+        self.wfile.flush()
+
     def stream_reply(self, acc, conv_id, user_id, messages, max_reply, notices):
         req = urllib.request.Request(
             CFG["ollama_url"] + "/api/chat",
@@ -939,27 +968,18 @@ class Handler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json"},
         )
         try:
-            resp = urllib.request.urlopen(req, timeout=600)
+            resp = urllib.request.urlopen(req, timeout=600)  # returns once Ollama has loaded the model
         except Exception as e:
             log("ollama request failed:", e)
-            raise ApiError(503, "offline", "The model is not responding right now.")
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Accel-Buffering", "no")
-        self.cors_headers()
-        self.end_headers()
-
-        def event(obj):
-            self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
-            self.wfile.flush()
+            return self.event({"type": "error", "error": "offline", "message": "The model is not responding right now."})
+        event = self.event
 
         reply, usage, client_gone, produced = [], None, False, 0
         # Closing resp (the with-block) drops the upstream connection, which makes Ollama stop generating.
         with resp:
             try:
                 event({"type": "meta", "conversation_id": conv_id, "user_message_id": user_id})
+                event({"type": "status", "state": "ready"})
                 for n in notices:
                     event({"type": "notice", "message": n})
                 for line in resp:

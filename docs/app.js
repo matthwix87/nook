@@ -770,7 +770,13 @@ function sendNew(text, attachments) {
 // when the server refuses the message before answering (e.g. it doesn't fit).
 async function stream(body, userNode, restore) {
   const box = $("#messages");
-  const bubble = el("div", { class: "bubble cursor" });
+  // Until the first token: a status line ("Thinking…", or "Waking up Nook…" while the host starts the model).
+  const statusText = el("span", {}, "Thinking…");
+  const status = el("div", { class: "status-line" }, el("span", { class: "status-dot" }), statusText);
+  const bubble = el("div", { class: "bubble" }, status);
+  const hintTimer = setTimeout(() => {
+    if (status.isConnected) status.after(el("div", { class: "status-hint" }, "The model is loading, this can take up to a minute."));
+  }, 20000);
   const tools = el("div", { class: "msg-tools" });
   const msg = el("div", { class: "msg assistant" }, bubble, tools);
   box.append(msg);
@@ -845,14 +851,19 @@ async function stream(body, userNode, restore) {
         } else if (ev.type === "notice") {
           msg.insertBefore(el("div", { class: "notice" }, ev.message), bubble);
         } else if (ev.type === "delta") {
+          if (!reply) bubble.classList.add("cursor");  // first token: the status line gets replaced
           reply += ev.text;
           if (!pending) { pending = true; requestAnimationFrame(paint); }
         } else if (ev.type === "done") {
           usage = ev.usage;
           if (ev.assistant_message_id) msg.dataset.id = ev.assistant_message_id;
           updateMeter(ev.budget);
+        } else if (ev.type === "status") {
+          status.classList.toggle("waking", ev.state === "starting");
+          statusText.textContent = ev.state === "starting" ? "Waking up Nook…" : "Thinking…";
         } else if (ev.type === "error") {
           fail(ev.message);
+          if (ev.error === "offline") checkStatus();
         }
       }
     }
@@ -868,6 +879,7 @@ async function stream(body, userNode, restore) {
     }
   } finally {
     state.abort = null;
+    clearTimeout(hintTimer);
     bubble.classList.remove("cursor");
     setStreaming(false);
     if (!failed && msg.isConnected) {
