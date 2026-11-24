@@ -118,6 +118,8 @@ label > input, label > textarea { margin-top: .35rem; }
   border: 3px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.wait-spinner { margin: 0 auto 1rem; }
+.wait-text { font-variant-numeric: tabular-nums; }
 
 /* ---------- app layout ---------- */
 .app { height: 100%; display: flex; position: relative; }

@@ -216,9 +216,74 @@ async function checkStatus() {
 }
 
 function showOffline(detail) {
+  stopWaiting();
+  $("#offline-title").textContent = "Currently not working";
   $("#offline-detail").textContent = detail || "The host's computer is offline. Try again later.";
   show("offline");
 }
+
+// "Try again": re-check every 5 s for up to 3 minutes. Each attempt re-reads backend.json,
+// because the tunnel URL changes when the host restarts. (The site can't switch a PC on.)
+const WAIT_MS = 3 * 60 * 1000;
+let waitEnd = 0, waitTimer = null, waitClock = null;
+
+async function backendUp() {
+  if (!sessionStorage.getItem("backend")) state.backend = await resolveBackend();
+  try { return (await api("/status", { timeout: 4000 })).available; } catch { return false; }
+}
+
+function setWaitingUI(on) {
+  $("#offline-spinner").hidden = $("#offline-wait").hidden = $("#offline-cancel").hidden = !on;
+  $("#offline-mark").hidden = $("#offline-retry").hidden = on;
+}
+
+function updateWaitClock() {
+  const s = Math.max(0, Math.ceil((waitEnd - Date.now()) / 1000));
+  $("#offline-wait").textContent = `Checking every few seconds - ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`;
+}
+
+function startWaiting() {
+  stopWaiting();
+  waitEnd = Date.now() + WAIT_MS;
+  $("#offline-title").textContent = "Waiting for the host";
+  $("#offline-detail").textContent = "Nook opens as soon as the host's computer is reachable again.";
+  setWaitingUI(true);
+  updateWaitClock();
+  waitClock = setInterval(updateWaitClock, 1000);
+  const attempt = async () => {
+    waitTimer = null;
+    const up = await backendUp();
+    if (!waitClock) return;  // cancelled meanwhile
+    if (up) { stopWaiting(); return boot(); }
+    if (Date.now() >= waitEnd) {
+      stopWaiting();
+      $("#offline-title").textContent = "Unavailable right now";
+      $("#offline-detail").textContent = "Still no answer from the host's computer. It may be switched off or restarting.";
+      return;
+    }
+    waitTimer = setTimeout(attempt, 5000);
+  };
+  attempt();
+}
+
+function stopWaiting() {
+  clearTimeout(waitTimer);
+  clearInterval(waitClock);
+  waitTimer = waitClock = null;
+  setWaitingUI(false);
+}
+
+$("#offline-cancel").addEventListener("click", () => {
+  stopWaiting();
+  $("#offline-title").textContent = "Currently not working";
+  $("#offline-detail").textContent = "The host's computer is offline. Try again later.";
+});
+
+// Coming back to the tab: check once.
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden || $("#view-offline").hidden || waitClock) return;
+  if (await backendUp()) boot();
+});
 
 function showDisabled(until) {
   $("#disabled-until").textContent = until ? `It re-enables on ${fmtTime(until)}.` : "";
@@ -277,7 +342,7 @@ $("#login-form").addEventListener("submit", async (ev) => {
 });
 
 document.querySelectorAll("[data-action=logout]").forEach((b) => b.addEventListener("click", () => logout()));
-$("#offline-retry").addEventListener("click", boot);
+$("#offline-retry").addEventListener("click", startWaiting);
 $("#disabled-retry").addEventListener("click", boot);
 
 // ---------------------------------------------------------------- chat shell

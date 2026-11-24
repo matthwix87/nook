@@ -1,7 +1,7 @@
 // Service worker: caches the app shell so the PWA opens instantly.
 // backend.json and all backend (cross-origin) requests always go to the network.
-const CACHE = "nook-shell-v3";
-const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest",
+const CACHE = "nook-shell-v4";
+const SHELL = ["./", "index.html", "style.css?v=4", "app.js?v=4", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -18,8 +18,11 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.endsWith("backend.json")) return;
   // Network first (so updates show up), cache as offline fallback.
+  // Asset URLs in index.html carry ?v=N; bump it together with CACHE on every release.
   e.respondWith(
-    fetch(e.request)
+    // no-cache: always revalidate with the server, so a stale HTTP-cached app.js/style.css
+    // can never be mixed with a newer index.html.
+    fetch(e.request, { cache: "no-cache" })
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));

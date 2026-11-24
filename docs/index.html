@@ -10,7 +10,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=4">
   <script>
     // Apply the saved theme before first paint (no flash).
     try { var t = JSON.parse(localStorage.getItem("theme")); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
@@ -25,10 +25,13 @@
   <!-- Offline / not working -->
   <section id="view-offline" class="center-view" hidden>
     <div class="card narrow">
-      <div class="status-mark off" aria-hidden="true"></div>
-      <h1>Currently not working</h1>
+      <div class="status-mark off" aria-hidden="true" id="offline-mark"></div>
+      <div class="spinner wait-spinner" aria-hidden="true" id="offline-spinner" hidden></div>
+      <h1 id="offline-title">Currently not working</h1>
       <p class="muted" id="offline-detail">The host's computer is offline. Try again later.</p>
+      <p class="muted wait-text" id="offline-wait" role="status" hidden></p>
       <button class="btn primary" id="offline-retry">Try again</button>
+      <button class="btn" id="offline-cancel" hidden>Cancel</button>
     </div>
   </section>
 
@@ -255,6 +258,6 @@
   </dialog>
 
   <div id="toast" class="toast" hidden role="status"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
